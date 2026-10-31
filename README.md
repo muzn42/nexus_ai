@@ -68,8 +68,8 @@ nexus2-anti/
 
 ### 1. Depoyu Klonlayın
 ```bash
-git clone https://github.com/muzn42/nexus-ai.git
-cd nexus-ai
+git clone https://github.com/muzn42/nexus_ai.git
+cd nexus_ai
 ```
 
 ### 2. Sanal Ortam Oluşturun (Önerilen)
