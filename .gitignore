@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets (CRITICAL)
+.env
+*.env
+.env.*
+!*.env.example
+data/nvdia_api.txt
+*api_key*
+*api.txt
+
+# GitHub file size limit is 100MB; Argos model is ~125MB (download via tools/setup_argos.py)
+*.argosmodel
+data/*.argosmodel
+
+# Runtime databases & dynamic caches
+data/translation_cache.db
+*.log
+
+# Temporary runtime directories & assistant transcripts
+temp_subs/
+conversations/*.jsonl
+
+# IDE & Editor files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini

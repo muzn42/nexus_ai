@@ -1,0 +1,26 @@
+# NEXUS AI v2 — Bağımlılıklar (Dependencies)
+
+# Modern Arayüz ve Görsel Öğeler
+customtkinter>=5.2.0
+pillow>=10.0.0
+
+# Görüntü İşleme ve Ekran Yakalama
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Klavye Dinleme ve Kısayollar
+keyboard>=0.13.5
+
+# OCR Motoru (PaddleOCR)
+# Not: GPU hızlandırması için paddlepaddle-gpu kurabilirsiniz.
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+
+# Çeviri Motorları
+google-generativeai>=0.3.0
+deep-translator>=1.11.0
+argostranslate>=1.9.0
+
+# Ağ ve Yardımcı Araçlar
+requests>=2.31.0
+pypdf>=3.17.0
