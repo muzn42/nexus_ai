@@ -205,6 +205,7 @@ class HUDWindow(QWidget):
                     self.history.pop(0)
             self.history_index = -1
             self.flash()
+        self.update()
         self.ensure_topmost()
 
     def apply_style(self, style: dict):
@@ -248,6 +249,7 @@ class HUDWindow(QWidget):
         self.btn_lock.setText("🔒" if self.locked else "🔓")
         if self.locked:
             self.toolbar.hide()
+        self.update()
         if not silent:
             self.locked_changed.emit(self.locked)
 
@@ -304,10 +306,12 @@ class HUDWindow(QWidget):
         if not self.locked:
             self.toolbar.show()
             self._hide_timer.start(2800)
+            self.update()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._hide_timer.start(700)
+        self.update()
         super().leaveEvent(e)
 
     def _maybe_hide_toolbar(self):
@@ -316,6 +320,7 @@ class HUDWindow(QWidget):
             return
         if not self.locked:
             self.toolbar.hide()
+            self.update()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and not self.locked:
@@ -360,15 +365,38 @@ class HUDWindow(QWidget):
             self.geometry_changed.emit()
 
     def paintEvent(self, event):
-        from PySide6.QtGui import QColor, QPainter, QPen
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        # --- arka plan (moda göre) ---
+        # --- dinamik metin kutusu arka planı (yalnızca aktif altyazı boyutunda) ---
+        trect = self.view.text_box_rect()
         bg = self.background_qcolor()
-        if bg is not None:
-            p.fillRect(self.rect(), bg)
+        if bg is not None and trect is not None:
+            mapped = QRectF(
+                trect.x() + self.view.x(),
+                trect.y() + self.view.y(),
+                trect.width(),
+                trect.height(),
+            )
+            path = QPainterPath()
+            path.addRoundedRect(mapped, 12.0, 12.0)
+            p.fillPath(path, bg)
+            if bg.alpha() > 80:
+                p.setPen(QPen(QColor(255, 255, 255, 28), 1.0))
+                p.setBrush(Qt.NoBrush)
+                p.drawPath(path)
+
+        # --- kilit açıkken konumlandırma kılavuzu ---
+        if not self.locked and (trect is None or self.underMouse() or self.toolbar.isVisible()):
+            guide = QPainterPath()
+            guide.addRoundedRect(QRectF(self.rect().adjusted(1, 1, -1, -1)), 10.0, 10.0)
+            p.fillPath(guide, QColor(21, 26, 33, 60))
+            p.setPen(QPen(QColor(255, 255, 255, 45), 1.0, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(guide)
 
         # --- boyutlandırma tutamacı (yalnızca kilit açıkken) ---
         if not self.locked:
@@ -405,4 +433,5 @@ class HUDWindow(QWidget):
             self.state_chip.set_tone("info")
         self.state_chip.adjustSize()
         self.view.set_text(text)
+        self.update()
         self.toolbar.adjustSize()

@@ -18,7 +18,10 @@ PP-OCRv6 için üç model boyutu desteklenir:
 """
 import json
 import os
+import threading
 import time
+
+_INIT_LOCK = threading.Lock()
 
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ.setdefault("GLOG_minloglevel", "2")
@@ -67,9 +70,9 @@ def _save_state(state: dict):
 
 
 def _dummy_image():
-    """Ön-ısınma için boş bir görüntü (numpy tembel import)."""
+    """Ön-ısınma için boş bir görüntü (altyazı şeridine yakın boyut)."""
     import numpy as np
-    return np.full((64, 320, 3), 255, dtype=np.uint8)
+    return np.full((112, 640, 3), 255, dtype=np.uint8)
 
 
 def _enable_nvidia_dlls() -> bool:
@@ -102,14 +105,15 @@ class OCREngine:
     MKLDNN CPU hızlandırmasını varsayılan olarak dener, hata verirse otomatik fallback yapar.
     """
 
-    def __init__(self, version: str = "PP-OCRv5", use_mkldnn: bool = True,
-                 model_size: str = DEFAULT_MODEL_SIZE, device: str = "cpu"):
+    def __init__(self, version: str = "PP-OCRv6", use_mkldnn: bool = True,
+                 model_size: str = DEFAULT_MODEL_SIZE, device: str = "gpu"):
         self.version = version
         self.use_mkldnn = use_mkldnn
         self.model_size = model_size if model_size in MODEL_SIZE_PRESETS else DEFAULT_MODEL_SIZE
-        self.device = device if device in ("cpu", "gpu") else "cpu"
+        self.device = device if device in ("cpu", "gpu") else "gpu"
         self._ocr = None
         self._mkldnn_known_bad = False
+        self._predict_lock = threading.Lock()
         self.last_init_seconds = 0.0
         self.last_infer_seconds = 0.0
         self._restore_mkldnn_state()
@@ -139,6 +143,9 @@ class OCREngine:
             "device": self.device,
             # MKLDNN yalnızca CPU'da anlamlı (GPU'da oneDNN kullanılmaz)
             "enable_mkldnn": bool(enable_mkldnn and self.device == "cpu"),
+            # Kısa kenar 736px altına indiğinde PaddleX'in şeridi 4-6 kat büyütmesini önler (~35x hız artışı)
+            "text_det_limit_type": "max",
+            "text_det_limit_side_len": 960,
         }
         if self.version == "PP-OCRv6":
             det, rec = MODEL_SIZE_PRESETS[self.model_size]
@@ -154,11 +161,12 @@ class OCREngine:
             return
 
         enable_mkldnn = self.use_mkldnn and not force_cpu and not self._mkldnn_known_bad
+        effective_mkldnn = bool(enable_mkldnn and self.device == "cpu")
         if self.device == "gpu":
             _enable_nvidia_dlls()
         t0 = time.time()
         print(f"[OCR] PaddleOCR başlatılıyor ({self.version}/{self.model_size}, "
-              f"mkldnn={enable_mkldnn})...")
+              f"device={self.device}, mkldnn={effective_mkldnn})...")
         try:
             from paddleocr import PaddleOCR
             self._ocr = PaddleOCR(**self._build_params(enable_mkldnn))
@@ -183,7 +191,7 @@ class OCREngine:
         # Oyun ortasında 10 sn'lik yeniden kurulum yerine burada yakalayıp CPU'ya düş.
         try:
             self._ocr.predict(_dummy_image())
-            if enable_mkldnn:
+            if effective_mkldnn:
                 self._remember_mkldnn(True)
         except Exception as e:
             if self.device == "gpu":
@@ -203,101 +211,196 @@ class OCREngine:
 
         self.last_init_seconds = time.time() - t0
         print(f"[OCR] PaddleOCR hazır ({self.last_init_seconds:.1f} sn, "
-              f"mkldnn={enable_mkldnn}).")
+              f"device={self.device}, mkldnn={effective_mkldnn}).")
 
     def reset(self, version: str = None, use_mkldnn: bool = None, model_size: str = None,
               device: str = None):
         """Motor parametreleri değiştiğinde yeniden başlatmak için."""
-        if version is not None:
-            self.version = version
-        if use_mkldnn is not None:
-            self.use_mkldnn = use_mkldnn
-        if model_size is not None and model_size in MODEL_SIZE_PRESETS:
-            self.model_size = model_size
-        if device is not None and device in ("cpu", "gpu"):
-            self.device = device
-        self._ocr = None  # Sonraki kullanımda lazy-init olacak
+        with self._predict_lock:
+            if version is not None:
+                self.version = version
+            if use_mkldnn is not None:
+                self.use_mkldnn = use_mkldnn
+            if model_size is not None and model_size in MODEL_SIZE_PRESETS:
+                self.model_size = model_size
+            if device is not None and device in ("cpu", "gpu"):
+                self.device = device
+            self._ocr = None  # Sonraki kullanımda lazy-init olacak
+
+    def _run_predict(self, image):
+        """Ortak predict() çalıştırıcısı: iş parçacığı güvenli + GPU/MKLDNN fallback."""
+        if image is None or not hasattr(image, "shape") or image.size == 0:
+            return None
+
+        with self._predict_lock:
+            with _INIT_LOCK:
+                self._ensure_initialized()
+            if self._ocr is None:
+                return None
+
+            try:
+                t0 = time.time()
+                result = self._ocr.predict(image)
+                self.last_infer_seconds = time.time() - t0
+                return result
+            except Exception as e:
+                if self.device == "gpu":
+                    print(f"[OCR] GPU okuma hatası ({str(e)[:110]}) — CPU'ya dönülüyor.")
+                    self.device = "cpu"
+                    self._ocr = None
+                elif self.use_mkldnn and not self._mkldnn_known_bad:
+                    print(f"[OCR] MKLDNN hatası ({str(e)[:110]}), standart CPU moduna geçiliyor...")
+                    self._remember_mkldnn(False)
+                    self._mkldnn_known_bad = True
+                    self._ocr = None
+                else:
+                    print(f"[OCR] Okuma hatası: {e}")
+                    return None
+
+                with _INIT_LOCK:
+                    self._ensure_initialized(force_cpu=True)
+                if self._ocr is None:
+                    return None
+                try:
+                    t0 = time.time()
+                    result = self._ocr.predict(image)
+                    self.last_infer_seconds = time.time() - t0
+                    return result
+                except Exception as e2:
+                    print(f"[OCR] Yeniden deneme hatası: {e2}")
+                    return None
+
+    @staticmethod
+    def _poly_to_bbox(poly) -> tuple:
+        """Poligon noktalarından (x, y, w, h) dikdörtgeni hesaplar."""
+        try:
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+            return (x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1))
+        except Exception:
+            return (0.0, 0.0, 0.0, 0.0)
+
+    @staticmethod
+    def _box_to_xywh(box) -> tuple:
+        """[x1, y1, x2, y2] veya 4 noktalı kutuyu (x, y, w, h) yapar."""
+        try:
+            if hasattr(box, "tolist"):
+                box = box.tolist()
+            if len(box) == 4 and not isinstance(box[0], (list, tuple)):
+                x1, y1, x2, y2 = [float(v) for v in box]
+                return (x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1))
+            return OCREngine._poly_to_bbox(box)
+        except Exception:
+            return (0.0, 0.0, 0.0, 0.0)
+
+    @classmethod
+    def _extract_items(cls, item) -> list:
+        """Tek bir PaddleOCR çıktı öğesinden ham (text, score, xywh, poly) listesi çıkarır."""
+        extracted = []
+
+        # Format 1 & 2: dict veya .json sarmalayıcısı
+        data = None
+        if isinstance(item, dict):
+            data = item.get("res") if ("res" in item and isinstance(item["res"], dict) and "rec_texts" not in item) else item
+        elif hasattr(item, "json") and isinstance(item.json, dict):
+            j = item.json
+            data = j.get("res") if ("res" in j and isinstance(j["res"], dict) and "rec_texts" not in j) else j
+
+        if isinstance(data, dict):
+            texts = data.get("rec_texts") or []
+            scores = data.get("rec_scores") or []
+            rec_boxes = data.get("rec_boxes")
+            polys = data.get("rec_polys")
+            if polys is None or (hasattr(polys, "__len__") and len(polys) == 0):
+                polys = data.get("dt_polys")
+
+            for i, raw_txt in enumerate(texts):
+                txt = str(raw_txt).strip() if raw_txt is not None else ""
+                if not txt:
+                    continue
+                score = float(scores[i]) if i < len(scores) else 1.0
+                poly = []
+                if polys is not None and i < len(polys):
+                    p = polys[i]
+                    poly = p.tolist() if hasattr(p, "tolist") else list(p)
+                if rec_boxes is not None and i < len(rec_boxes):
+                    xywh = cls._box_to_xywh(rec_boxes[i])
+                elif poly:
+                    xywh = cls._poly_to_bbox(poly)
+                else:
+                    xywh = (0.0, 0.0, 0.0, 0.0)
+                extracted.append((txt, score, xywh, poly))
+            return extracted
+
+        # Format 3: klasik liste formatı [[poly, (text, score)], ...]
+        if isinstance(item, (list, tuple)):
+            for line in item:
+                if not isinstance(line, (list, tuple)) or len(line) != 2:
+                    continue
+                raw_box, text_part = line
+                if isinstance(text_part, (tuple, list)) and len(text_part) >= 1:
+                    txt = str(text_part[0]).strip()
+                    score = float(text_part[1]) if len(text_part) >= 2 else 1.0
+                elif isinstance(text_part, str):
+                    txt = text_part.strip()
+                    score = 1.0
+                else:
+                    continue
+                if not txt:
+                    continue
+                poly = raw_box.tolist() if hasattr(raw_box, "tolist") else (list(raw_box) if isinstance(raw_box, (list, tuple)) else [])
+                xywh = cls._poly_to_bbox(poly) if poly else (0.0, 0.0, 0.0, 0.0)
+                extracted.append((txt, score, xywh, poly))
+        return extracted
+
+    def read_boxes(self, image, offset_x: int = 0, offset_y: int = 0,
+                   scale_x: float = 1.0, scale_y: float = 1.0,
+                   min_score: float = 0.55) -> list[dict]:
+        """
+        Görüntüden konumlu metin kutularını okur.
+        scale_x / scale_y: küçültülmüş OCR karesini orijinal koordinata çevirme çarpanı.
+        Döner: [{"text": str, "score": float, "bbox": (x, y, w, h), "poly": list, "line_count": 1}, ...]
+        """
+        result = self._run_predict(image)
+        if not result:
+            return []
+
+        boxes = []
+        for item in result:
+            for txt, score, (bx, by, bw, bh), poly in self._extract_items(item):
+                if score < min_score or bw <= 0 or bh <= 0:
+                    continue
+                rx = int(round(offset_x + bx * scale_x))
+                ry = int(round(offset_y + by * scale_y))
+                rw = max(1, int(round(bw * scale_x)))
+                rh = max(1, int(round(bh * scale_y)))
+                scaled_poly = [
+                    [int(round(offset_x + p[0] * scale_x)), int(round(offset_y + p[1] * scale_y))]
+                    for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2
+                ]
+                boxes.append({
+                    "text": txt,
+                    "score": score,
+                    "bbox": (rx, ry, rw, rh),
+                    "poly": scaled_poly,
+                    "line_count": 1,
+                })
+        return boxes
 
     def read_text(self, image) -> str:
         """
         Görüntüden metin oku. Temiz bir string döndürür.
         PaddleOCR 3.7+ predict çıktısı (dict listesi) ve eski sürümleri destekler.
         """
-        if image is None or not hasattr(image, "shape") or image.size == 0:
-            return ""
-
-        self._ensure_initialized()
-        if self._ocr is None:
-            return ""
-
-        try:
-            t0 = time.time()
-            result = self._ocr.predict(image)
-            self.last_infer_seconds = time.time() - t0
-        except Exception as e:
-            # GPU veya MKLDNN kaynaklı çalışma hatası: CPU'ya düşüp bir kez yeniden dene
-            if self.device == "gpu":
-                print(f"[OCR] GPU okuma hatası ({str(e)[:110]}) — CPU'ya dönülüyor.")
-                self.device = "cpu"
-                self._ocr = None
-            elif self.use_mkldnn and not self._mkldnn_known_bad:
-                print(f"[OCR] MKLDNN hatası ({str(e)[:110]}), standart CPU moduna geçiliyor...")
-                self._remember_mkldnn(False)
-                self._mkldnn_known_bad = True
-                self._ocr = None
-            else:
-                print(f"[OCR] Okuma hatası: {e}")
-                return ""
-            self._ensure_initialized(force_cpu=True)
-            if self._ocr is None:
-                return ""
-            try:
-                t0 = time.time()
-                result = self._ocr.predict(image)
-                self.last_infer_seconds = time.time() - t0
-            except Exception as e2:
-                print(f"[OCR] Yeniden deneme hatası: {e2}")
-                return ""
-
+        result = self._run_predict(image)
         if not result:
             return ""
 
         texts = []
-
         for item in result:
-            # Format 1: PaddleOCR 3.7+ güncel format (dict içinde 'rec_texts')
-            if isinstance(item, dict):
-                rec = item.get("rec_texts")
-                if rec and isinstance(rec, (list, tuple)):
-                    texts.extend(str(t) for t in rec if t)
-                elif "res" in item and isinstance(item["res"], dict):
-                    sub_rec = item["res"].get("rec_texts")
-                    if sub_rec and isinstance(sub_rec, (list, tuple)):
-                        texts.extend(str(t) for t in sub_rec if t)
-                continue
-
-            # Format 2: hasattr(item, 'json') — PaddleOCR v3 nesne formatı
-            if hasattr(item, "json"):
-                json_data = item.json
-                if isinstance(json_data, dict):
-                    if "rec_texts" in json_data and isinstance(json_data["rec_texts"], (list, tuple)):
-                        texts.extend(str(t) for t in json_data["rec_texts"] if t)
-                    elif "res" in json_data and isinstance(json_data["res"], dict):
-                        sub_rec = json_data["res"].get("rec_texts")
-                        if sub_rec and isinstance(sub_rec, (list, tuple)):
-                            texts.extend(str(t) for t in sub_rec if t)
-                continue
-
-            # Format 3: list of [bbox, (text, confidence)] — Eski v2 formatı
-            if isinstance(item, (list, tuple)):
-                for line in item:
-                    if isinstance(line, (list, tuple)) and len(line) == 2:
-                        text_part = line[1]
-                        if isinstance(text_part, (tuple, list)) and len(text_part) >= 1:
-                            texts.append(str(text_part[0]))
-                        elif isinstance(text_part, str):
-                            texts.append(text_part)
-
+            for txt, _score, _xywh, _poly in self._extract_items(item):
+                texts.append(txt)
         return " ".join(texts).strip()
 
     def status(self) -> str:
@@ -308,3 +411,114 @@ class OCREngine:
             mode = "CPU" if (self._mkldnn_known_bad or not self.use_mkldnn) else "CPU+MKLDNN"
         return (f"{self.version}/{self.model_size} • {mode} • "
                 f"init {self.last_init_seconds:.1f}s • son OCR {self.last_infer_seconds * 1000:.0f}ms")
+
+
+def merge_nearby_boxes(boxes: list[dict], max_y_gap_ratio: float = 0.55,
+                       max_x_gap_ratio: float = 2.5) -> list[dict]:
+    """
+    Aynı satırda veya alt alta yer alan bitişik cümle/paragraf kutularını birleştirir.
+    Farklı sütunlardaki menü öğelerini veya uzak HUD elemanlarını birleştirmez.
+    """
+    if not boxes:
+        return []
+
+    def _copy_box(b):
+        return {
+            "text": b["text"],
+            "score": float(b.get("score", 1.0)),
+            "bbox": tuple(b["bbox"]),
+            "poly": list(b.get("poly", [])),
+            "line_count": int(b.get("line_count", 1)),
+        }
+
+    # 1) Aynı satırdaki yakın yatay parçaları birleştir (soldan sağa)
+    items = sorted((_copy_box(b) for b in boxes), key=lambda b: (b["bbox"][1], b["bbox"][0]))
+    line_merged = []
+    for cur in items:
+        cx, cy, cw, ch = cur["bbox"]
+        cy_mid = cy + ch * 0.5
+        merged = False
+        for prev in line_merged:
+            px, py, pw, ph = prev["bbox"]
+            py_mid = py + ph * 0.5
+            min_h = min(ch, ph)
+            max_h = max(ch, ph)
+            if max_h / max(1, min_h) > 1.7:
+                continue
+            # Dikey merkezler aynı satırda mı?
+            if abs(cy_mid - py_mid) > min_h * 0.35:
+                continue
+            x_gap = cx - (px + pw)
+            prev_text = prev["text"].strip()
+            cur_text = cur["text"].lstrip()
+            cur_starts_lower = bool(cur_text and cur_text[0].islower())
+            if not cur_starts_lower:
+                if x_gap > min_h * 0.45:
+                    continue
+                if prev_text.isupper() and cur_text.isupper() and x_gap > min_h * 0.25:
+                    continue
+            # Geniş boşluk (>1.35*h, örn. [R] tuş ikonu boşluğu) yalnızca cümle bitmemişse ve satır hizası tam ise birleştirilir
+            if x_gap > min_h * 1.35:
+                if abs(cy_mid - py_mid) > min_h * 0.28 or prev_text.endswith((".", "!", "?")):
+                    continue
+            if -min_h * 0.4 <= x_gap <= min_h * max_x_gap_ratio:
+                nx = min(px, cx)
+                ny = min(py, cy)
+                nx2 = max(px + pw, cx + cw)
+                ny2 = max(py + ph, cy + ch)
+                prev["bbox"] = (nx, ny, nx2 - nx, ny2 - ny)
+                prev["text"] = f"{prev['text']} {cur['text']}".strip()
+                prev["score"] = min(prev["score"], cur["score"])
+                merged = True
+                break
+        if not merged:
+            line_merged.append(cur)
+
+    # 2) Alt alta bitişik satırları (çok satırlı altyazı / ipucu / mesaj) birleştir
+    line_merged.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+    para_merged = []
+    for cur in line_merged:
+        cx, cy, cw, ch = cur["bbox"]
+        c_center = cx + cw * 0.5
+        merged = False
+        for prev in reversed(para_merged):
+            px, py, pw, ph = prev["bbox"]
+            line_h = ph / max(1, prev["line_count"])
+            min_h = min(ch, line_h)
+            max_h = max(ch, line_h)
+            if max_h / max(1, min_h) > 1.6:
+                continue
+            y_gap = cy - (py + ph)
+            if y_gap < -min_h * 0.25 or y_gap > min_h * max_y_gap_ratio:
+                continue
+            # Dikey menü/liste, üst üste buton ipuçları ve cümle sonrası görev satırlarını ayır
+            prev_t = prev["text"].strip()
+            cur_t = cur["text"].strip()
+            prev_words = prev_t.split()
+            cur_words = cur_t.split()
+            if len(prev_words) <= 2 and len(cur_words) <= 2:
+                continue
+            if len(prev_words) <= 2 and cur_t and cur_t[0].isupper() and not prev_t.endswith((",", "-")):
+                continue
+            if prev_t.endswith((".", "!", "?")) and cur_t and cur_t[0].isupper() and y_gap > min_h * 0.35:
+                continue
+            # Yatay örtüşme veya merkez/sol hizalama kontrolü
+            overlap_x = min(px + pw, cx + cw) - max(px, cx)
+            p_center = px + pw * 0.5
+            same_left = abs(cx - px) <= max(28, min_h * 1.5)
+            same_center = abs(c_center - p_center) <= max(40, min_h * 2.0)
+            if overlap_x > 0 or same_left or same_center:
+                nx = min(px, cx)
+                ny = min(py, cy)
+                nx2 = max(px + pw, cx + cw)
+                ny2 = max(py + ph, cy + ch)
+                prev["bbox"] = (nx, ny, nx2 - nx, ny2 - ny)
+                prev["text"] = f"{prev['text']} {cur['text']}".strip()
+                prev["score"] = min(prev["score"], cur["score"])
+                prev["line_count"] += cur["line_count"]
+                merged = True
+                break
+        if not merged:
+            para_merged.append(cur)
+
+    return para_merged

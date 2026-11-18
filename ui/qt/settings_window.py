@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QColorDialog, QComboBox, QGridLayout,
 
 from core.theme import C, DEFAULT_PRESET, R, S, SUBTITLE_PRESETS
 from ui.qt.components import (Card, Chip, Divider, FramelessWindow, SliderRow,
-                              Toast, label, vbox)
+                              Toast, ToggleRow, label, vbox)
 from ui.qt.subtitle_view import SubtitleView
 
 SAMPLE_TEXT = ("Dutch: We ride at dawn, Arthur. Tahiti is waiting for us."
@@ -257,6 +257,37 @@ class SettingsWindow(FramelessWindow):
             mode_card, "Kutu rengi", self.c.settings.get("bg_color", "#000000"),
             lambda v: self._set("bg_color", v))
         ll.addWidget(mode_card)
+
+        patch_card = Card(
+            "Canlı Yama Katmanı (In-Place Patch)",
+            "Tam Yama ve Hibrit modlarında oyun içi yazıların görünümü.")
+        self.slider_chameleon = self._slider_row(
+            patch_card,
+            "Bukalemun maske yoğunluğu (orijinal yazıyı örtme)",
+            40, 98,
+            int(self.c.settings.get("chameleon_opacity", 78)), " %",
+            lambda v: self._set("chameleon_opacity", v))
+        self.toggle_auto_color = ToggleRow(
+            "Orijinal yazı rengini koru",
+            "GTA görev sarısı, kırmızı uyarılar gibi renkleri otomatik algılar.",
+            self.c.settings.get("auto_text_color", True))
+        self.toggle_auto_color.changed.connect(
+            lambda v: self._set("auto_text_color", v))
+        patch_card.add(self.toggle_auto_color)
+        self.toggle_noise_filter = ToggleRow(
+            "Oyun gürültü filtresi",
+            "Mini-harita N/S/E/W, para/mermi sayıları ve tuş ikonlarını çevirmez.",
+            self.c.settings.get("noise_filter_enabled", True))
+        self.toggle_noise_filter.changed.connect(
+            lambda v: self._set("noise_filter_enabled", v))
+        patch_card.add(self.toggle_noise_filter)
+        self.slider_stab = self._slider_row(
+            patch_card,
+            "Hareketli tabela kararlılık filtresi",
+            1, 5,
+            int(self.c.settings.get("stabilization_frames", 2)), " kare",
+            lambda v: self._set("stabilization_frames", v))
+        ll.addWidget(patch_card)
         ll.addStretch(1)
 
         scroll.setWidget(left)
@@ -344,51 +375,98 @@ class SettingsWindow(FramelessWindow):
         page = QWidget()
         lay = QHBoxLayout(page)
         lay.setSpacing(S.LG)
-        col = vbox(spacing=S.MD)
 
-        card = Card("Metin tanıma (OCR)",
-                    "Ekrandaki yazıyı okuyan motor. Hız ve doğruluk dengesi.")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        left = QWidget()
+        col = vbox(left, spacing=S.MD, margins=(0, 0, S.SM, 0))
+
+        sub_card = Card(
+            "1. Altyazı OCR Motoru (Hızlı Hat)",
+            "Alt-orta altyazı şeridini kesintisiz okuyan birincil motor.",
+        )
         self.combo_ocr_ver = self._combo_row(
-            card, "OCR sürümü", ["PP-OCRv6", "PP-OCRv5", "PP-OCRv4"],
-            self.c.settings.get("paddle_version", "PP-OCRv5"),
+            sub_card, "Altyazı OCR sürümü", ["PP-OCRv6", "PP-OCRv5", "PP-OCRv4"],
+            self.c.settings.get("paddle_version", "PP-OCRv6"),
             self._on_ocr_version,
             sub="PP-OCRv6 = en yeni ve en hızlı")
 
         self.combo_ocr_size = self._combo_row(
-            card, "Model boyutu", ["tiny", "small", "medium"],
+            sub_card, "Altyazı model boyutu", ["tiny", "small", "medium"],
             self.c.settings.get("ocr_model_size", "small"),
             lambda v: self._on_ocr_change("ocr_model_size", v),
             sub="tiny = en hızlı · small = dengeli (önerilen) · "
                 "medium = en doğru ama yavaş")
 
         self.combo_ocr_device = self._combo_row(
-            card, "İşlem birimi", ["cpu", "gpu"],
-            self.c.settings.get("ocr_device", "cpu"),
+            sub_card, "Altyazı işlem birimi", ["gpu", "cpu"],
+            self.c.settings.get("ocr_device", "gpu"),
             lambda v: self._on_ocr_change("ocr_device", v),
-            sub="gpu = NVIDIA kartı kullan (paddlepaddle-gpu kurulu olmalı)")
-        col.addWidget(card)
+            sub="gpu = NVIDIA kartı kullan · cpu = işlemci")
+        col.addWidget(sub_card)
 
-        speed = Card("Hız / doğruluk ipuçları",
-                     "Aynı sonucu daha hızlı almak için:")
-        tips = [
-            "• 'small' model oyun altyazıları için fazlasıyla yeterli.",
-            "• GPU varsa 'gpu' seçin: CPU'ya göre ~3 kat hızlı.",
-            "• Altyazı alanını dar seçin — OCR süresi alanla büyür.",
-            "• 'Akıllı Filtre' açıkken değişmeyen kareler hiç okunmaz.",
-        ]
-        for t in tips:
-            speed.add(label(t, "muted", size=9, wrap=True))
-        col.addWidget(speed)
+        dual_on = bool(self.c.settings.get("dual_ocr_enabled", True))
+        world_card = Card(
+            "2. Dünya / Menü OCR Motoru (Paralel Arka Plan)",
+            "Konsol / Capture Card modunda altyazıyı bekletmeden menü ve ipuçlarını okur.",
+        )
+        self.toggle_dual_ocr = ToggleRow(
+            "Altyazı ve dünya için ayrı paralel OCR motoru kullan",
+            "Açıkken altyazı (örn. GPU) ve dünya/menü yazıları (örn. CPU) iki ayrı kolda aynı anda çalışır.",
+            dual_on,
+        )
+        self.toggle_dual_ocr.changed.connect(self._on_dual_ocr_toggle)
+        world_card.add(self.toggle_dual_ocr)
+
+        self.combo_world_ocr_ver = self._combo_row(
+            world_card, "Dünya OCR sürümü", ["PP-OCRv6", "PP-OCRv5", "PP-OCRv4"],
+            self.c.settings.get("world_paddle_version", "PP-OCRv6"),
+            lambda v: self._on_ocr_change("world_paddle_version", v))
+
+        self.combo_world_ocr_size = self._combo_row(
+            world_card, "Dünya model boyutu", ["tiny", "small", "medium"],
+            self.c.settings.get("world_ocr_model_size", "small"),
+            lambda v: self._on_ocr_change("world_ocr_model_size", v))
+
+        self.combo_world_ocr_device = self._combo_row(
+            world_card, "Dünya işlem birimi", ["cpu", "gpu"],
+            self.c.settings.get("world_ocr_device", "cpu"),
+            lambda v: self._on_ocr_change("world_ocr_device", v),
+            sub="Capture Card modunda işlemci boşta olduğu için CPU+MKLDNN önerilir.")
+
+        self.toggle_mkldnn = ToggleRow(
+            "CPU MKLDNN (oneDNN) hızlandırma",
+            "CPU seçili motorda Intel oneDNN hızlandırmasını açar/kapatır.",
+            self.c.settings.get("use_mkldnn", True),
+        )
+        self.toggle_mkldnn.changed.connect(
+            lambda v: self._on_ocr_change("use_mkldnn", v))
+        world_card.add(self.toggle_mkldnn)
+        self._sync_world_ocr_enabled(dual_on)
+        col.addWidget(world_card)
 
         self.ocr_status = Card("Motor durumu")
-        self.ocr_status.add(label("Henüz başlatılmadı.", "muted", size=9))
-        btn_test = QPushButton("Motoru test et")
+        self.ocr_status.add(label("Henüz başlatılmadı.", "muted", size=9, wrap=True))
+        btn_test = QPushButton("Motorları test et")
         btn_test.clicked.connect(self._test_ocr)
         self.ocr_status.add(btn_test)
         col.addWidget(self.ocr_status)
         col.addStretch(1)
 
-        lay.addLayout(col, 1)
+        scroll.setWidget(left)
+        lay.addWidget(scroll, 1)
+
+        right = vbox(spacing=S.MD)
+        speed = Card("Hız / doğruluk ipuçları",
+                     "Capture Card + Konsol & PC kullanım notları:")
+        tips = [
+            "• Paralel Mod (GPU Altyazı + CPU Dünya): İki ayrı thread çalışır; dünya/menü çevirisi beklerken altyazı 1 ms bile gecikmez.",
+            "• 'small' model keskin harfleri ('Pearson' vb.) korur; 'tiny' en düşük OCR süresini verir.",
+            "• CPU seçili motorda MKLDNN (oneDNN) yalnızca CPU tarafında aktif olur; GPU modunda CUDA/cuDNN kullanılır.",
+        ]
+        for t in tips:
+            speed.add(label(t, "muted", size=9, wrap=True))
+        right.addWidget(speed)
 
         warn = Card("Bilinen sorun: PaddlePaddle sürümü",
                     "OCR beklenenden yavaşsa sebebi bu olabilir.")
@@ -400,8 +478,19 @@ class SettingsWindow(FramelessWindow):
             "--index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/\n"
             "    pip install nvidia-cudnn-cu12 nvidia-cublas-cu12",
             size=9, wrap=True))
-        lay.addWidget(warn, 1)
+        right.addWidget(warn)
+        right.addStretch(1)
+        lay.addLayout(right, 1)
         return page
+
+    def _sync_world_ocr_enabled(self, enabled: bool):
+        for w in (self.combo_world_ocr_ver, self.combo_world_ocr_size,
+                  self.combo_world_ocr_device):
+            w.setEnabled(bool(enabled))
+
+    def _on_dual_ocr_toggle(self, value: bool):
+        self._sync_world_ocr_enabled(bool(value))
+        self._on_ocr_change("dual_ocr_enabled", bool(value))
 
     def _on_ocr_version(self, v):
         self._on_ocr_change("paddle_version", v)
@@ -420,17 +509,25 @@ class SettingsWindow(FramelessWindow):
             try:
                 img = np.zeros((120, 900, 3), dtype=np.uint8)
                 img[:, :] = 30
-                # basit metin çizmek için cv2 (zaten bağımlılık)
                 import cv2
                 cv2.putText(img, "Dutch is waiting at camp.", (20, 75),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                self.c.ocr_engine.read_text(img)   # ısınma
                 import time
+                sub_ocr = self.c.ocr_engine
+                sub_ocr.read_text(img)
                 t0 = time.time()
-                text = self.c.ocr_engine.read_text(img)
+                text = sub_ocr.read_text(img)
                 ms = (time.time() - t0) * 1000
-                msg = (f"{self.c.ocr_engine.status()}\n"
-                       f"Ölçüm: {ms:.0f} ms · okunan: '{text}'")
+                lines = [f"Altyazı: {sub_ocr.status()} · {ms:.0f} ms · '{text}'"]
+
+                world_ocr = self.c.world_ocr_engine
+                if world_ocr is not sub_ocr:
+                    world_ocr.read_text(img)
+                    t1 = time.time()
+                    w_txt = world_ocr.read_text(img)
+                    w_ms = (time.time() - t1) * 1000
+                    lines.append(f"Dünya  : {world_ocr.status()} · {w_ms:.0f} ms · '{w_txt}'")
+                msg = "\n".join(lines)
             except Exception as e:
                 msg = f"Test hatası: {e}"
             from PySide6.QtCore import QTimer
@@ -472,10 +569,15 @@ class SettingsWindow(FramelessWindow):
         self.toggle_learn = ToggleRow(
             "Otomatik öğrenme",
             "Yapay zekadan gelen çevirileri yerel havuza kaydeder; "
-            "aynı cümle tekrar gelince anında ve bedava döner.",
-            self.c.settings.get("auto_learn_enabled", True))
+            "aynı cümle tekrar gelince anında ve bedava döner. (Deneyler için varsayılan kapalı.)",
+            self.c.settings.get("auto_learn_enabled", False))
         self.toggle_learn.changed.connect(self._on_auto_learn)
         learn.add(self.toggle_learn)
+
+        self.btn_clear_learn = QPushButton("Öğrenilen önbelleği temizle")
+        self.btn_clear_learn.setProperty("variant", "ghost")
+        self.btn_clear_learn.clicked.connect(self._clear_auto_learn)
+        learn.add(self.btn_clear_learn)
 
         self.toggle_filter = ToggleRow(
             "Akıllı filtre",
@@ -557,8 +659,18 @@ class SettingsWindow(FramelessWindow):
         self.c.set_setting("auto_learn_enabled", value)
         self.c.translator.auto_learn_enabled = value
 
+    def _clear_auto_learn(self):
+        try:
+            self.c.auto_learn.clear()
+            self.c.translator.clear_cache()
+            self._notify("Öğrenilen çeviri önbelleği temizlendi.", "ok")
+        except Exception as e:
+            self._notify(f"Temizleme hatası: {e}", "danger")
+
     # ============================================================ KISAYOLLAR
     HOTKEYS = [
+        ("hotkey_mode", "Yama modu değiştir (Tam / Hibrit / Altyazı)", "f6"),
+        ("hotkey_freeze", "Anlık Dondur & Oku (tüm ekranı çevir)", "f7"),
         ("hotkey_start", "Başlat / Durdur", "f9"),
         ("hotkey_reselect", "Alan seç", "f10"),
         ("hotkey_settings", "Ayarlar", "f11"),

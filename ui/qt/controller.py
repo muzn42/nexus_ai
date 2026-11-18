@@ -24,13 +24,16 @@ from core.translation_engine import TranslationEngine
 class Controller(QObject):
     """Motorlar + ayarlar + hat yönetimi."""
 
-    text_ready = Signal(str, str)      # çeviri, kaynak etiketi
-    partial_ready = Signal(str)        # SSE kısmi çeviri
-    state_changed = Signal(str)        # idle | running | paused | error
+    text_ready = Signal(str, str)           # çeviri, kaynak etiketi
+    partial_ready = Signal(str)             # SSE kısmi çeviri
+    boxes_ready = Signal(list, object, object)  # tracked boxes, origin, frame_size
+    state_changed = Signal(str)             # idle | running | paused | error
     stats_changed = Signal(dict)
-    toast = Signal(str, str)           # mesaj, ton
-    roi_changed = Signal(object)       # (x,y,w,h) veya None
-    dict_changed = Signal(str)         # aktif sözlük yolu
+    toast = Signal(str, str)                # mesaj, ton
+    roi_changed = Signal(object)            # (x,y,w,h) veya None
+    dict_changed = Signal(str)              # aktif sözlük yolu
+    mode_changed = Signal(str)              # full_patch | hybrid | subtitle_only
+    freeze_changed = Signal(bool)           # Dondur & Oku durumu
 
     def __init__(self):
         super().__init__()
@@ -42,23 +45,47 @@ class Controller(QObject):
         self.db_manager = DBManager(self.settings.get("db_path", ""))
         self.auto_learn = AutoLearnDB(DATA_DIR)
         self.ocr_engine = self._build_ocr()
+        self.world_ocr_engine = self._build_world_ocr()
         self.translator = self._build_translator()
 
         self.pipeline = None
         last_roi = self.settings.get("last_roi")
         self.roi = tuple(last_roi) if isinstance(last_roi, (list, tuple)) and len(last_roi) == 4 else None
         self.hud = None
+        self.patch_overlay = None
         self.window_handle = int(self.settings.get("window_handle", 0) or 0)
         self._hotkey_stop = threading.Event()
+
+        self.boxes_ready.connect(self._on_boxes_ready)
 
     # ------------------------------------------------------------ motorlar
     def _build_ocr(self) -> OCREngine:
         s = self.settings
         return OCREngine(
-            version=s.get("paddle_version", "PP-OCRv5"),
+            version=s.get("paddle_version", "PP-OCRv6"),
             use_mkldnn=s.get("use_mkldnn", True),
             model_size=s.get("ocr_model_size", "small"),
-            device=s.get("ocr_device", "cpu"),
+            device=s.get("ocr_device", "gpu"),
+        )
+
+    def _build_world_ocr(self) -> OCREngine:
+        s = self.settings
+        if not s.get("dual_ocr_enabled", True):
+            return self.ocr_engine
+        w_ver = s.get("world_paddle_version", "PP-OCRv6")
+        w_size = s.get("world_ocr_model_size", "small")
+        w_dev = s.get("world_ocr_device", "cpu")
+        if (w_ver, w_size, w_dev) == (
+            s.get("paddle_version", "PP-OCRv6"),
+            s.get("ocr_model_size", "small"),
+            s.get("ocr_device", "gpu"),
+        ):
+            return self.ocr_engine
+        return OCREngine(
+            version=w_ver,
+            use_mkldnn=s.get("use_mkldnn", True),
+            model_size=w_size,
+            device=w_dev,
         )
 
     def _build_translator(self) -> TranslationEngine:
@@ -71,13 +98,15 @@ class Controller(QObject):
             gemini_api_key=s.get("gemini_api_key", ""),
             groq_api_key=s.get("groq_api_key", ""),
             evren_api_key=s.get("evren_api_key", ""),
-            auto_learn_enabled=s.get("auto_learn_enabled", True),
+            auto_learn_enabled=s.get("auto_learn_enabled", False),
         )
 
     def rebuild_ocr(self):
         self.ocr_engine = self._build_ocr()
+        self.world_ocr_engine = self._build_world_ocr()
         if self.pipeline:
             self.pipeline.ocr = self.ocr_engine
+            self.pipeline.world_ocr = self.world_ocr_engine
 
     def rebuild_translator(self):
         self.translator = self._build_translator()
@@ -92,6 +121,10 @@ class Controller(QObject):
         self.settings[key] = value
         if autosave:
             self.save()
+        if self.pipeline:
+            self.pipeline.update_settings(self.settings)
+        if self.patch_overlay and key in ("font_family", "chameleon_opacity", "auto_text_color"):
+            self.patch_overlay.apply_settings(self.settings)
 
     def style(self) -> dict:
         """HUD görünüm stili (ön ayar + ince ayarlar)."""
@@ -129,6 +162,62 @@ class Controller(QObject):
             ConfigManager.save_profile(profile_name, list(self.roi))
         self.roi_changed.emit(self.roi)
 
+    # ------------------------------------------------------------ yama katmanı & modlar
+    def ensure_patch_overlay(self):
+        if self.patch_overlay is None:
+            from ui.qt.patch_overlay import PatchOverlayWindow
+            self.patch_overlay = PatchOverlayWindow(
+                self.settings.get("font_family", "Segoe UI")
+            )
+            self.patch_overlay.apply_settings(self.settings)
+        return self.patch_overlay
+
+    def _on_boxes_ready(self, boxes, origin, frame_size):
+        if not boxes and (self.patch_overlay is None or not self.patch_overlay.isVisible()):
+            return
+        overlay = self.ensure_patch_overlay()
+        overlay.apply_settings(self.settings)
+        overlay.set_freeze_active(bool(self.pipeline and self.pipeline.is_frozen))
+        overlay.set_boxes(boxes, origin, frame_size)
+
+    def set_patch_mode(self, mode: str):
+        if mode not in ("full_patch", "hybrid", "subtitle_only"):
+            mode = "full_patch"
+        self.set_setting("patch_mode", mode)
+        if mode == "subtitle_only" and self.patch_overlay:
+            self.patch_overlay.clear_boxes()
+            self.patch_overlay.hide()
+        if mode == "full_patch" and self.hud:
+            self.hud.hide()
+        names = {
+            "full_patch": "Tam Yama (Her Yer)",
+            "hybrid": "Hibrit (Altyazı HUD + Yama)",
+            "subtitle_only": "Sadece Altyazı",
+        }
+        self.mode_changed.emit(mode)
+        self.toast.emit(f"Mod: {names.get(mode, mode)}", "info")
+
+    def cycle_patch_mode(self):
+        order = ("full_patch", "hybrid", "subtitle_only")
+        cur = self.settings.get("patch_mode", "full_patch")
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "full_patch"
+        self.set_patch_mode(nxt)
+
+    def toggle_freeze_scan(self):
+        p = self._ensure_pipeline()
+        p.update_settings(self.settings)
+        overlay = self.ensure_patch_overlay()
+        frozen = p.trigger_freeze_scan()
+        overlay.set_freeze_active(frozen)
+        if frozen:
+            overlay.show()
+            overlay.ensure_topmost(force_style=True)
+            self.toast.emit("Anlık Dondur & Oku aktif (F7 ile dön)", "info")
+        else:
+            overlay.clear_boxes()
+            self.toast.emit("Canlı yama moduna dönüldü", "ok")
+        self.freeze_changed.emit(frozen)
+
     # ------------------------------------------------------------ hat
     def _ensure_pipeline(self) -> TranslationPipeline:
         if self.pipeline is None:
@@ -139,10 +228,12 @@ class Controller(QObject):
                 callbacks={
                     "on_text": lambda t, s: self.text_ready.emit(t, s),
                     "on_partial": lambda t: self.partial_ready.emit(t),
+                    "on_boxes": lambda b, o, fs: self.boxes_ready.emit(b, o, fs),
                     "on_stats": lambda d: self.stats_changed.emit(d),
                     "on_state": lambda s: self.state_changed.emit(s),
                     "on_error": lambda m: self.toast.emit(m, "danger"),
                 },
+                world_ocr_engine=self.world_ocr_engine,
             )
             self.pipeline.set_source(
                 self.settings.get("source_type", "screen"),
@@ -154,26 +245,33 @@ class Controller(QObject):
         return self.pipeline
 
     def start(self) -> bool:
-        if not self.roi:
-            self.toast.emit("Önce altyazı alanını seçin.", "warn")
-            return False
         p = self._ensure_pipeline()
         p.update_settings(self.settings)
+        if self.settings.get("patch_mode", "full_patch") != "subtitle_only":
+            self.ensure_patch_overlay()
         p.start()
         return True
 
     def pause(self):
         if self.pipeline:
             self.pipeline.pause()
+        if self.patch_overlay:
+            self.patch_overlay.clear_boxes()
+            self.patch_overlay.hide()
+        self.freeze_changed.emit(False)
 
     def stop(self):
         if self.pipeline:
             self.pipeline.stop()
+        if self.patch_overlay:
+            self.patch_overlay.clear_boxes()
+            self.patch_overlay.hide()
+        self.freeze_changed.emit(False)
 
     def toggle(self):
         p = self._ensure_pipeline()
         if p.is_running:
-            p.pause()
+            self.pause()
         else:
             self.start()
 
@@ -265,8 +363,11 @@ class Controller(QObject):
                 t0 = time.time()
                 self.ocr_engine.read_text(img)
                 dt = time.time() - t0
-                self.toast.emit(f"OCR hazır ({dt:.1f} sn) · "
-                                f"{self.ocr_engine.status()}", "ok")
+                msg = f"OCR hazır ({dt:.1f} sn) · {self.ocr_engine.status()}"
+                if self.world_ocr_engine is not self.ocr_engine:
+                    self.world_ocr_engine.read_text(img)
+                    msg += f" | Dünya: {self.world_ocr_engine.status()}"
+                self.toast.emit(msg, "ok")
             except Exception as e:
                 self.toast.emit(f"OCR ısınma hatası: {e}", "danger")
 
@@ -285,6 +386,8 @@ class Controller(QObject):
         except Exception:
             pass
         try:
+            if self.patch_overlay:
+                self.patch_overlay.close()
             if self.hud:
                 self.settings["hud_geometry"] = self.hud.geometry_string()
             self.save()

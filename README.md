@@ -1,292 +1,215 @@
-# NEXUS AI — Gerçek Zamanlı Oyun Çeviri Asistanı
+# NEXUS AI (v2 / v3 Canlı Tam Ekran Yama Motoru)
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PaddleOCR](https://img.shields.io/badge/OCR-PP--OCRv6-orange.svg)](https://github.com/PaddlePaddle/PaddleOCR)
-[![UI](https://img.shields.io/badge/UI-PySide6%20(Qt)-41CD52.svg)](https://doc.qt.io/qtforpython-6/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+**NEXUS AI**, PC oyunları ile **PS5 / PS6 + Capture Card** (OBS / yakalama önizlemesi veya Chiaki Remote Play) üzerinden gelen oyun görüntülerindeki altyazı, menü, kontrol ipucu ve arayüz yazılarını **gerçek zamanlı OCR + Yerel Sözlük + Paralel Yapay Zeka Akışı** ile Türkçeye (ve seçili hedef dillere) çevirip **orijinal oyunun üzerine yerinde yama (In-Place Patch)** veya **dinamik altyazı HUD** olarak çizen PySide6 tabanlı Windows uygulamasıdır.
 
-Ekrandaki veya capture card üzerindeki oyun altyazısını okur (OCR), sözlüğünden
-ya da yapay zekadan çevirir ve oyunun üstünde **tıklamaları engellemeyen şeffaf
-bir katman** olarak gösterir. PS5'te oyunu kendi dilinde oynamak için tasarlandı.
-
----
-
-## Neden bu sürüm?
-
-Arayüz baştan yazıldı: **Tkinter → PySide6 (Qt)**. Kazançlar:
-
-| Konu | Eski (Tkinter) | Yeni (Qt) |
-|---|---|---|
-| Altyazı çizimi | Metin başına ~80 nesne | Tek `QPainterPath` stroke+fill |
-| Saydamlık | Renk anahtarı, tırtıklı kenar | Gerçek piksel-alfa, anti-aliased |
-| Oyun üstünde tıklama geçişi | Yok | `WS_EX_TRANSPARENT` ile gerçek |
-| Ayarlar | Anlık geri bildirim yok | **Canlı önizleme** |
-| Sözlük tarayıcı | Elle | Tablo + anlık arama |
-| İlk kullanım | Keşfetmesi zor | 4 adımlı sihirbaz |
+> **Hızlı Başlatma:**
+> ```bash
+> git clone <repo-url>
+> cd nexus2-anti
+> pip install -r requirements.txt
+> python main.py
+> ```
 
 ---
 
-## Özellikler
+## İçindekiler
 
-- **PP-OCRv6 / v5 / v4** + model boyutu seçimi (**tiny / small / medium**)
-- **CPU (MKLDNN) veya GPU (CUDA)** — GPU'da ~30-70 ms
-- **Hibrit çeviri zinciri:**
-  1. Bellek içi LRU önbellek (0 ms)
-  2. Altın Sözlük (`nexus_golden.db`)
-  3. Oyun Sözlüğü (`rdr2_ceviri.db` vb.)
-  4. Otomatik öğrenme havuzu
-  5. Yapay zeka: Akıllı Zincir (Groq → Gemini) / Google / Argos
-- **Sözlük Kütüphanesi:** yerel dosyaları otomatik bulur, tek tıkla indirir,
-  `.db` içe aktarır, içinde iki dilli arama yapar
-- **Chiaki-ng yardımcısı:** PS5'i ağda otomatik bulur, adım adım rehber
-- **Görünüm stüdyosu:** 5 hazır ön ayar + yazı boyutu/renk/çizgi kalınlığı,
-  canlı önizleme
-- **Şeffaf, tıklama geçirgen HUD** + tekerlekle altyazı geçmişi
-- **Sadece seçilen bölge yakalanır** → algılama döngüsü 5-10 kat hızlı
-- **Arka planda OCR ısınma:** ilk "Başlat" beklemesiz
+1. [Temel Özellikler & Çalışma Modları](#1-temel-özellikler--çalışma-modları)
+2. [Neler Yaptık ve Neden? (Mimari Kararlar & AI Ajan Rehberi)](#2-neler-yaptık-ve-neden-mimari-kararlar--ai-ajan-rehberi)
+3. [Veri Akışı: İki Paralel İş Parçacığı (Dual-OCR Pipeline)](#3-veri-akışı-iki-paralel-iş-parçacığı-dual-ocr-pipeline)
+4. [Dosya ve Modül Mimarisi](#4-dosya-ve-modül-mimarisi)
+5. [Ayarlar (`config/settings.json`) & Kısayol Tuşları](#5-ayarlar-configsettingsjson--kısayol-tuşları)
+6. [Bilinen Donanım / PaddleOCR Notları & Kurulum](#6-bilinen-donanım--paddleocr-notları--kurulum)
 
 ---
 
-## Kurulum
+## 1. Temel Özellikler & Çalışma Modları
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
+`F6` kısayolu veya ana pencereden 3 farklı görüntüleme/yama modu arasında anında geçiş yapılır:
 
-### ⚠️ PaddlePaddle sürümü (OCR hızını 3-6 kat etkiler)
-`paddlepaddle 3.3.0/3.3.1` sürümlerinde oneDNN (MKLDNN) + PIR hatası var
-(`ConvertPirAttribute2RuntimeAttribute` → [Paddle#77340](https://github.com/PaddlePaddle/Paddle/issues/77340)).
-OCR sessizce yavaş CPU moduna düşer. Çözüm:
+| Mod (`patch_mode`) | Davranış | Ne Zaman Kullanılır? |
+| :--- | :--- | :--- |
+| **`full_patch`** *(Varsayılan)* | Hem alt-orta altyazıları hem de ekranın her yerindeki menüleri, sol-üst ipuçlarını, silah/eşya çarkını ve sağ-alt buton açıklamalarını **orijinal yerlerinde** Buzlu Cam + Bukalemun yaması ile kaplayıp Türkçeleştirir. | GTA 6, RDR2 vb. oyunları tam Türkçe yama gibi oynarken. |
+| **`hybrid`** | Alt-orta altyazıları alttaki **dinamik boyutlu HUD** penceresinde gösterir; altyazı dışı tüm dünya/menü yazılarını ise kendi yerlerinde yamalar. | Altyazıyı sabit HUD stilinde okumak, menüleri yine yerinde çevirmek istediğinizde. |
+| **`subtitle_only`** | Yalnızca seçilen manuel ROI alanını veya otomatik alt-orta altyazı şeridini okur ve HUD penceresinde gösterir. | Yalnızca diyalog altyazılarına odaklanıp maksimum hız istendiğinde. |
 
-```bash
-pip install paddlepaddle==3.2.2
-```
-
-GPU için (NVIDIA + CUDA 12.6):
-```bash
-pip install paddlepaddle-gpu==3.2.2 --index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
-pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
-```
+### Ek Canlı Özellikler
+- **`F7` Anlık Dondur & Oku (`trigger_freeze_scan`):** Yoğun metinli bir menüde veya hızlı kaybolan ekranda tam çözünürlüklü tek kare yakalayıp tarar ve `❄ DONDURULDU` şeridi ile ekranı sabitler; tekrar `F7` ile canlı moda döner.
+- **`WDA_EXCLUDEFROMCAPTURE` Koruması:** `MainWindow`, `HUDWindow`, `PatchOverlayWindow` ve tüm uygulama pencereleri Windows DWM API üzerinden yakalama dışı bırakılır (`core/windows.py`). Böylece OCR kendi çizdiği Türkçe metni asla tekrar okuyup döngüye girmez.
+- **SSE Canlı Akış (`stream=True`):** Altyazı LLM çevirisi Groq `GPT-OSS` üzerinden kelime/token aktıkça (`on_partial`) ekranda belirir; cümlenin bitmesini beklemez.
+- **Konsol / Capture Card Desteği:** Hem masaüstü/pencere (`ScreenSource` / `WindowSource`) hem Capture Card (`CameraSource`) kaynaklarını ve PS5 Remote Play (`core/chiaki.py`) keşfini destekler.
 
 ---
 
-## Çalıştırma
+## 2. Neler Yaptık ve Neden? (Mimari Kararlar & AI Ajan Rehberi)
 
-```bash
-python main.py
-```
+Bu bölüm, projeyi devralan geliştiricilerin ve **kod üzerinde çalışacak başka bir yapay zeka ajanının** her mekanizmanın neden o şekilde yazıldığını anlaması için kararların gerekçelerini özetler.
 
-İlk açılışta sihirbaz sizi 4 adımda hazırlar:
+### 2.1. Yerinde Buzlu Cam + Bukalemun Yama (`ui/qt/patch_overlay.py` & `core/text_filter.py`)
+- **Sorun:** Klasik tek renk siyah/opak dikdörtgen yamalar oyunun arayüzünde yamalı duruyor ve alttaki farklı renkli panellerle (GTA 6 menü seçili gri bar, siyah altyazı kutusu, sol-üst koyu ipucu kutusu) uyumsuz görünüyordu. Ayrıca RDR2/GTA görevlerindeki sarı/renkli vurgu kelimeleri kayboluyordu.
+- **Çözüm (`sample_box_style` & `PatchOverlayWindow.paintEvent`):**
+  1. **Buzlu Cam (`blurred_rgb`):** Orijinal oyun karesindeki kutu kırpımı `cw//4 × ch//4` boyutuna küçültülüp `GaussianBlur` uygulanır ve geri büyütülür. Bu işlem büyük kutularda bile 0.3 ms altında sürer ve alttaki İngilizce harfleri tamamen eritir.
+  2. **Bukalemun Zemin (`bg_color`):** Kutunun 2–3 px dış kenar piksellerinin medyan rengi örneklenir ve `chameleon_opacity` (%) ile buzlu camın üzerine doldurulur.
+  3. **Orijinal Metin Rengi (`fg_color`) & Hizalama (`align`):** Arka plandan en farklı %15 pikselin medyanından orijinal metin rengi (ör. görev sarısı, kırmızı uyarı, beyaz veya seçili açık menü çubuğundaki koyu yazı) korunur; ekran ortasındaki geniş kutular ortalı, yan kutular sola yaslı çizilir.
+  4. **İkonlara Taşmayan Dolgu (`pad_x`):** `PatchOverlayWindow.paintEvent` içinde altyazılar için `pad_x=5.0 px`, altyazı dışı buton/menü etiketleri için ise `pad_x=1.5 px` kullanılır ki sağdaki kontrolcü buton ikonlarının üzerine taşmasın.
 
-1. **Dil + motor** — anahtarsız başlamak için "Google Translate" seçin
-2. **Alan seç** — ekranda altyazının çıktığı dikdörtgeni işaretleyin
-3. **Sözlük (opsiyonel)** — varsa çeviriler anında ve bedava gelir
-4. **Başlat**
+### 2.2. Neden İki Ayrı Paralel OCR + Çeviri Thread'i? (`core/pipeline.py`)
+- **Sorun:** Tek thread çalışan bir hatta tam ekran dünya/menü OCR'ı ve `translate_batch()` AI çağrısı 600–1500 ms sürdüğünde, o sırada çıkan yeni bir altyazı cümlesi dünya işinin bitmesini beklemek zorunda kalıyordu. Ayrıca GTA 6 gibi PS5/PS6 + Capture Card üzerinden oynanan oyunlarda **PC'nin hem GPU'su hem CPU'su oyun tarafından kullanılmadığı için boşta bekliyordu.**
+- **Çözüm:** `TranslationPipeline` iki bağımsız daemon thread başlatır:
+  - **`nexus-sub-pipeline` (`_loop` / `_tick`):** Yalnızca alt-orta altyazı şeridiyle (`auto_subtitle_roi`, `y: 0.72..0.98`) ilgilenir. Varsayılan olarak **GPU** (`PP-OCRv6 / small / gpu`) kullanır, altyazı değiştiğinde anında OCR çalıştırır ve SSE `on_partial` ile kelime kelime basar. Dünya hattını **0 ms** bekler.
+  - **`nexus-world-pipeline` (`_world_loop` / `_process_world_pass`):** `world_scan_interval` (varsayılan `0.55s`) aralığında tam karedeki menü, sol-üst ipucu, sağ-alt buton barı ve silah çarkını ayrı `world_ocr` motoruyla (varsayılan **CPU + MKLDNN**, `PP-OCRv6 / small / cpu`) okur ve değişen yeni kutuları tek HTTP isteğiyle (`translate_batch`) topluca çevirip `self._box_lock` üzerinden `BoxTracker`'a işler.
+  - **Ön koşul:** PaddleOCR/PaddlePaddle'ın çoklu motor ve paralel tahmin sırasında çakışmaması için `core/ocr_engine.py` içinde global `_INIT_LOCK` ve motor bazlı `_predict_lock`, `core/translation_engine.py` içinde ise `_cache_lock`, `_context_lock` ve thread-local `requests.Session` (`_tls`) eklendi.
+  - **Yapılandırılabilirlik:** `Ayarlar → OCR` sekmesinde altyazı ve dünya motorları için tüm sürümler (`PP-OCRv6`, `PP-OCRv5`, `PP-OCRv4`), boyutlar (`tiny`, `small`, `medium`) ve işlem birimleri (`gpu`, `cpu`) bağımsız seçilebilir; `dual_ocr_enabled` kapatılırsa her iki hat aynı motoru paylaşır.
 
-### Kısayollar
+### 2.3. Yüksek Geçiren Altyazı Piksel Kapısı & `text_det_limit_type="max"`
+- **Neden:**
+  1. PaddleOCR 3.x varsayılan olarak `text_det_limit_type="min"` ve `736` kullanır. Bu da `1088×280` gibi ince altyazı şeritlerini deteksiyon öncesinde **4–6 kat büyütüp** GPU/CPU süresini gereksiz yere uzatıyordu. `core/ocr_engine.py` (`_build_params`) içinde `"text_det_limit_type": "max"`, `"text_det_limit_side_len": 960` ayarlanarak gereksiz büyütme engellendi.
+  2. Deniz, ağaç, araba ışığı gibi hareketli arka planlar varken altyazı metni sabit kalsa bile standart kare-farkı eşikleri her karede yeniden OCR tetikliyordu. `has_subtitle_text_changed()` (`core/text_filter.py`) şeridi `160×44` gri tona indirip `|gray - GaussianBlur(gray)|` yüksek geçiren kenar maskesi çıkarır (~1–1.5 ms): altyazı sabitken arka plan hareketini yok sayar, altyazı kaybolduğunda (`has_any_text == False`) ise OCR çalıştırmadan anında altyazı kutularını temizler.
 
-| Tuş | İşlev |
-|---|---|
-| `F9` | Başlat / Durdur |
-| `F10` | Altyazı alanını seç |
-| `F11` | Ayarlar |
-| `F8` | HUD kilidi (tıklamalar oyuna geçsin) |
-| `F12` | Çıkış |
+### 2.4. Çoklu Alt-Bant Altyazı Takibi (Simultaneous Dialogue + Objective Prompt)
+- **Sorun (GTA 6 ekran görüntülerinde gözlendi):** Bazı sahnelerde aynı anda üstte beyaz konuşma altyazısı (*"It's gross. Plus, sharks. And barracudas..."*) ve onun hemen altında görev cümlesi (*"Collect the package"*) çıkar. Eskiden tek altyazı kutusuna veya tek satıra zorlanınca iki farklı metin birleşiyor ve ne sözlükte eşleşiyor ne de temiz yama yerleşimi veriyordu.
+- **Çözüm:**
+  - `merge_nearby_boxes` içinde cümle sonu noktalama (`"."`, `"!"`, `"?"`) + büyük harfle başlayan alt satır ve dikey boşluk (`y_gap > min_h * 0.35`) kontrolüyle alt görev satırı konuşmadan ayrıldı.
+  - `pipeline.py` tek `_active_sub_box` yerine `self._active_sub_boxes: list[TrackedBox]` tutar; `_process_subtitle_band` alt bölgedeki tüm bağımsız blokları korur, her birine ayrı stil (`bg_color`, `fg_color`) çıkarır ve yerli yerinde yamalar (ör. konuşma beyaz, `"Collect the package"` beyaz/pembe vurguyla kendi konumunda kalır).
 
-Ayarlar → Kısayollar'dan değiştirilebilir.
+### 2.5. Buton İkonu Kırpma, Metin Temizleme ve Akıllı Kutu Birleştirme
+Gerçek RDR2 / GTA 6 yayın karelerinde tespit edilip doğrudan giderilen hatalar:
+1. **Sağ Alt / Sol Alt Buton İkonlarının Kapanması (`trim_button_icons_from_boxes`):**
+   - `PHOTO STUDIO [■]  SELECT (X)  BACK (O)` veya `Photo Mode [:::] Select (X) Back (O)` barlarında OCR bazen ikonu metnin genişliğine dahil ediyor, çeviri yaması da yanındaki buton ikonunun üzerini örtüyordu.
+   - `trim_button_icons_from_boxes` iki aşamalı çalışır: (A) OCR tarafından yakalanıp elenen kısa ikon kutularının (`X`, `O`, `R` gibi) koordinatını metin kutusundan keser; (B) kısa HUD/menü etiketlerinin (`<= 3` kelime, `bh <= 38`) sol/sağ ucundaki kare ikon bloklarını (`0.45*bh <= run_w <= 1.12*bh`) `|gray - median(gray)|` sütun kontrast profiliyle (hem koyu üstü açık hem `Map` gibi açık üstü koyu barlarda çalışır) tespit edip kutuyu yalnızca metin alanına daraltır.
+2. **Yapışık / Kayıp Satır İçi Buton Metinleri (`clean_ocr_game_text`):**
+   - `② Help` → `Help` (baştaki ikon gliflerini temizler)
+   - `SELECTX` / `SELECT X` → `SELECT` (buton adına yapışan tek harfli konsol tuşunu atar)
+   - `Holdwhile` → `Hold while` (OCR satır içi `(X)` ikonunu atladığında birleşen fiil+bağlacı ayırır)
+   - `Use R to select your binoculars` → `Use [R] to select your binoculars` (çıplak kalan analog/buton harfini korur)
+3. **Menü, İpucu ve Silah Çarkı Ayrımı (`merge_nearby_boxes`):**
+   - Yatayda `> 0.45*min_h` (veya tümü büyük harfken `> 0.25*min_h`) boşluk varsa **yalnızca** sağdaki parça küçük harfle başlıyorsa (`Hold` + `to drop the deer` / `Holdwhile steering`) birleştirir; yan yana barlar (`PHOTO STUDIO`, `SELECT`, `BACK`) birleşmez.
+   - Dikeyde iki blok da `<= 2` kelimeyse (`Map`, `Game`, `Store`, `Help`, `Photo Studio`, `Settings`; silah çarkındaki `EMPTY` / `EXPLOSIVES`, `UNARMED` / `IN HAND`) veya üst satır `<= 2` kelimelik başlıksa (`Accelerate` / `Brake and reverse`) dikey birleştirme yapılmaz.
+4. **Yayın Filigranı, Para/Sayaç ve Türkçe Metin Filtresi (`is_translatable_game_text`):**
+   - Yayın overlay sponsorlarını ve kanal logolarını (`Yemeksepeti`, `SHIRRAKO`, `GTASERIES.COM`, `VI`) atlar.
+   - `[ğüşıöçĞÜŞİÖÇ]` içeren halihazırda Türkçe metinleri (ör. yayındaki Türkçe altyazı overlay'ini) tekrar çeviriye sokmaz.
+   - `$407`, `4 77`, `0 0`, mini-harita pusula harflerini (`N`, `S`, `W`, `E`) ve `<16×11` gürültü kutularını eler.
+
+### 2.6. Dinamik Boyutlu HUD (`ui/qt/subtitle_view.py` & `ui/qt/hud.py`)
+- **Sorun:** `hybrid` ve `subtitle_only` modlarında `Opak` / `Yarı Saydam` arka plan seçildiğinde HUD penceresi tüm sabit dikdörtgeni (`1000×200` vb.) boyadığı için kısa altyazılarda ekranın büyük kısmını boş siyah kutu kaplıyordu.
+- **Çözüm:** `SubtitleView.compute_layout()` + `text_box_rect()` aktif sarılmış metnin gerçek piksel genişliğini ve yüksekliğini hesaplar; `HUDWindow.paintEvent()` yalnızca bu dinamik kutuyu çizer (altyazı yokken ve kilitliyken zemin tamamen görünmezdir).
+
+### 2.7. O(1) Normalize DB İndeksi & Varsayılan Kapalı `AutoLearnDB` (`core/db_manager.py`)
+- **O(1) DB İndeksi:** 355.000+ satırlı `rdr2_ceviri.db` veritabanında `difflib.get_close_matches` eşleşmeyen her cümlede ~800 ms CPU tüketiyordu. Artık yükleme sırasında tag'siz normalize hash tabloları (`_golden_norm`, `_data_norm`) ve 3 kelimelik ters kova indeksi (`_word_index`) hazırlanır; arama <1.5 ms sürer.
+- **Özel İsim / Marka Koruması (`core/llm_chain.py`):** GTA 6 / RDR2 yerelleştirme prompt'ları *Lucia, Jason, Arthur, Vice City, Leonida, Ocean Beach, Sprunk, LifeInvader, Weazel News* gibi özel isimlerin ve `[R1]`, `[E]` tuş etiketlerinin çevrilmesini yasaklar. Ayrıca tek başına özel isim döndüyse (`is_proper_noun`) `PatchOverlayWindow` o yerin üzerine gereksiz yama çizmez.
+- **Varsayılan Kapalı `AutoLearnDB`:** Deneyler ve yeni oyun testleri sırasında bozuk veya deneysel OCR çıktılarının yerel `data/translation_cache.db` içine kaydedilip sonraki okumaları kirletmemesi için `auto_learn_enabled` varsayılan olarak **`False`** gelir. Kapalıyken `AutoLearnDB` ne okunur ne yazılır (`_lookup_local` ve `_record_online`). İstenirse `Ayarlar → Çeviri → Otomatik öğrenme` ile açılıp **Öğrenilen önbelleği temizle** butonuyla tek tıkla sıfırlanabilir.
 
 ---
 
-## PS5'te kullanım (Chiaki-ng)
-
-1. PS5 → Ayarlar → Sistem → **Uzaktan Oynatmayı Etkinleştir**
-2. Chiaki-ng'yi kur, PS5'i kaydet (8 haneli kod)
-3. Nexus AI → **PS5 / Chiaki-ng** ekranı → **PS5'imi Bul** (otomatik IP taraması)
-4. Oyunu Chiaki'de aç → Nexus AI'da kaynak "PC Ekranı" → alan seç → `F9`
-
-Chiaki-ng: https://github.com/streetpea/chiaki-ng/releases
-
----
-
-## Proje yapısı
+## 3. Veri Akışı: İki Paralel İş Parçacığı (Dual-OCR Pipeline)
 
 ```text
-nexus2-anti/
-├── main.py                      # Giriş noktası → ui/qt/app.py
-├── core/
-│   ├── theme.py                 # Tasarım sistemi (renkler, QSS, ön ayarlar)
-│   ├── config_manager.py        # settings.json / profiles.json
-│   ├── capture.py               # Ekran / kamera yakalama (ROI optimizasyonu)
-│   ├── ocr_engine.py            # PaddleOCR (tiny/small/medium, CPU/GPU)
-│   ├── db_manager.py            # Sözlük yükleme + auto-learn
-│   ├── db_catalog.py            # Sözlük kütüphanesi (indir/içe aktar/ara)
-│   ├── translation_engine.py    # Hibrit çeviri dispatcher
-│   ├── llm_chain.py             # Groq → Gemini zinciri (SSE)
-│   ├── pipeline.py              # Yakala → OCR → çevir döngüsü
-│   └── chiaki.py                # PS5 bulma + rehber
-├── ui/qt/
-│   ├── app.py                   # QApplication, kısayollar, ısınma
-│   ├── controller.py            # Motorlar + sinyaller
-│   ├── components.py            # Card, Chip, Toast, SliderRow...
-│   ├── main_window.py           # Ana ekran (4 adım)
-│   ├── settings_window.py       # 5 sekmeli ayarlar + canlı önizleme
-│   ├── dictionary_window.py     # Sözlük kütüphanesi
-│   ├── chiaki_window.py         # PS5 yardımcısı
-│   ├── onboarding.py            # İlk kullanım sihirbazı
-│   ├── subtitle_view.py         # Altyazı çizimi (QPainterPath)
-│   ├── hud.py                   # Şeffaf, tıklama geçirgen katman
-│   └── roi_selector.py          # Tam ekran alan seçici
-├── ui/                          # Eski Tkinter arayüzü (yedek, main_v1.py)
-├── config/                      # settings.json, profiles.json, dictionaries.json
-└── data/                        # *.db sözlükleri
-```
-
-
-NEXUS AI, ekrandaki veya HDMI Capture Card üzerindeki oyun altyazılarını ve metinlerini anlık olarak okuyan (OCR), **Yerel Veritabanı (RDR2 SQLite) + NVIDIA NIM / Google Gemini AI** hibrit altyapısı ile Türkçe'ye çeviren ve şeffaf/özelleştirilebilir bir HUD (overlay) üzerinde gösteren yeni nesil bir çeviri asistanıdır.
-
----
-
-## ✨ Özellikler
-
-- 🚀 **PP-OCRv5 Desteği:** PaddleOCR PP-OCRv5 ile oyun içi altyazılarda ultra hızlı ve yüksek doğrulukta metin tanıma.
-- ⚡ **Hibrit Çok Katmanlı Çeviri Akışı:**
-  1. **Bellek İçi LRU Önbellek (0 ms)**: Tekrarlanan replikler anında ekrana gelir.
-  2. **Altın Veritabanı (`nexus_golden.db`)**: Yapay zeka ile süzülmüş yüksek kaliteli çeviriler.
-  3. **Oyun Veritabanı (`rdr2_ceviri.db`)**: Yerel SQLite veritabanı eşleşmesi.
-  4. **Otomatik Öğrenme DB (`AutoLearnDB`)**: Yeni çevrilen cümleler otomatik olarak yerel veritabanına kaydedilir.
-  5. **Online & Offline Motorlar**: Google Gemini AI, Argos Translate (tamamen çevrimdışı) veya Google Translate.
-- 🎮 **Oyun İçi Şeffaf HUD (Overlay):** Tıklama geçiren (click-through), şeffaf arka planlı, kenarlık (stroke) ve font ayarlı modern arayüz.
-- 📹 **HDMI Capture Card & Çift Ekran Desteği:** Konsol oyuncuları için Capture Card üzerinden görüntü alma desteği.
-
----
-
-## 📁 Proje Klasör Yapısı
-
-```text
-nexus2-anti/
-├── main.py                     # Ana uygulama başlatıcı (HUD)
-├── requirements.txt            # Python bağımlılık listesi
-├── .env.example                # API anahtarları için örnek şablon
-├── README.md                   # Proje dokümantasyonu
-│
-├── config/                     # Yapılandırma ve kırpma profilleri
-│   ├── profiles.json           # Kayıtlı ekran koordinat profilleri
-│   ├── capture_profiles.json   # Capture Card profilleri
-│   └── settings.json           # Kullanıcı arayüz ve motor ayarları
-│
-├── core/                       # Çekirdek modüller
-│   ├── config_manager.py       # Ayar ve profil yöneticisi
-│   ├── db_manager.py           # SQLite ve Altın DB yöneticisi
-│   ├── ocr_engine.py           # PaddleOCR motoru
-│   └── translation_engine.py   # Hibrit çeviri yönlendiricisi
-│
-├── ui/                         # Arayüz bileşenleri
-│   ├── hud.py                  # Şeffaf oyun içi HUD overlay
-│   ├── launcher.py             # Başlatıcı ve ekran seçim ekranı
-│   ├── settings_dialog.py      # Ayarlar penceresi
-│   └── widgets.py              # Özel UI bileşenleri
-│
-├── data/                       # Veritabanı dosyaları
-│   ├── nexus_golden.db         # AI ile işlenmiş altın çeviri veritabanı
-│   ├── rdr2_ceviri.db          # 27MB RDR2 diyalog veritabanı
-│   └── ...
-│
-├── tools/                      # Yardımcı araçlar ve test betikleri
-│   ├── setup_argos.py          # Argos Translate çevrimdışı model indirici
-│   ├── ai_refiner.py           # Veritabanı iyileştirme aracı
-│   └── convert_pdf.py          # PDF senaryo dönüştürücü
-│
-└── archive/                    # Eski sürüm ve geliştirme yedekleri
+[Oyun / Capture Card / Pencere Karesi] (20 FPS)
+   │
+   ├─► Hat 1: nexus-sub-pipeline (Altyazı — GPU Öncelikli)
+   │     ├─ auto_subtitle_roi (y=0.72..0.98) veya kullanıcı ROI'si
+   │     ├─ has_subtitle_text_changed() [~1.2 ms yüksek geçiren kapı]
+   │     │     └─ has_any_text == False → altyazıyı anında temizle (OCR yok)
+   │     ├─ OCREngine (self.ocr: varsayılan PP-OCRv6/small/gpu)
+   │     ├─ clean_ocr_game_text + trim_button_icons + sample_box_style
+   │     └─ TranslationEngine → DB (<1 ms) veya LLMChain SSE (on_partial)
+   │
+   └─► Hat 2: nexus-world-pipeline (Dünya & Menü — CPU+MKLDNN Öncelikli)
+         ├─ Dirty-grid kontrolü + world_scan_interval (0.55s)
+         ├─ OCREngine (self.world_ocr: varsayılan PP-OCRv6/small/cpu)
+         ├─ Altyazı bandını dışla, ikonları kırp, merge_nearby_boxes
+         ├─ BoxTracker (IoU eşleştirme + stabilizasyon + piksel kaybolma kontrolü)
+         └─ TranslationEngine.translate_batch() → tek HTTP çağrısında toplu çeviri
+               │
+               ▼ (self._box_lock altında birleşik çıkış)
+   [Çıkış Katmanı — WDA_EXCLUDEFROMCAPTURE aktif]
+     ├─ full_patch    → PatchOverlayWindow (Buzlu Cam + Bukalemun Yama)
+     ├─ hybrid        → Altyazı: HUDWindow (Dinamik Boyut) | Dünya: PatchOverlayWindow
+     └─ subtitle_only → HUDWindow (Dinamik Boyutlu Altyazı)
 ```
 
 ---
 
-## 🚀 Kurulum
+## 4. Dosya ve Modül Mimarisi
 
-### 1. Depoyu Klonlayın
-```bash
-git clone https://github.com/muzn42/nexus_ai.git
-cd nexus_ai
-```
+### Çekirdek (`core/`)
+| Dosya | Sorumluluk |
+| :--- | :--- |
+| `core/config_manager.py` | `DEFAULT_SETTINGS`, `SettingsManager`, `ConfigManager`, `.env` yükleme. |
+| `core/capture.py` | `ScreenSource`, `WindowSource` (DPI uyumlu arka/ön pencere yakalama), `CameraSource` (Capture Card). |
+| `core/windows.py` | Win32 pencere listeleme ve `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` koruması. |
+| `core/ocr_engine.py` | `OCREngine` (PP-OCRv4/v5/v6, tiny/small/medium, GPU CUDA + CPU MKLDNN fallback, `_INIT_LOCK` + `_predict_lock`, `text_det_limit_type="max"`) ve `merge_nearby_boxes()`. |
+| `core/text_filter.py` | `clean_ocr_game_text`, `is_translatable_game_text`, `split_speaker_prefix`, `is_in_auto_subtitle_zone`, `auto_subtitle_roi`, `has_subtitle_text_changed`, `sample_box_style`, `trim_button_icons_from_boxes`. |
+| `core/box_tracker.py` | `TrackedBox` & `BoxTracker`: IoU + metin benzerliği takibi, koordinat yumuşatma, `stabilization_frames` onayı, piksel tabanlı kaybolma kontrolü (`check_disappearances`). |
+| `core/pipeline.py` | `TranslationPipeline`: `nexus-sub-pipeline` ve `nexus-world-pipeline` paralel iş parçacıkları, `F7` `process_full_frame(..., is_freeze=True)` tam kare taraması. |
+| `core/db_manager.py` | `DBManager` (O(1) normalize hash + 3 kelimelik kova indeksi, atomik yükleme) ve `AutoLearnDB` (`find`, `save`, `clear`, `count`). |
+| `core/db_catalog.py` | Sözlük kütüphanesi keşfi ve kurulumu (`gta6_ceviri.db`, `rdr2_ceviri.db`, `nexus_golden.db`). |
+| `core/llm_chain.py` | `LLMChain`: Groq (`openai/gpt-oss-120b`), EVREN, Gemini zinciri; SSE streaming, oyun yerelleştirme prompt'ları (`SYSTEM_PROMPT`, `BATCH_SYSTEM_PROMPT`), özel isim koruma, 429/503 cooldown yönetimi. |
+| `core/translation_engine.py` | `TranslationEngine`: thread-safe LRU bellek cache → Altın/Oyun DB → (açıksa) AutoLearn → LLM/Google/Argos zinciri + `translate_batch()`. |
+| `core/chiaki.py` | PS5 Remote Play (Chiaki) otomatik keşfi ve ağ kontrolü. |
+| `core/theme.py` | Karanlık tema renkleri, tipografi ve PySide6 QSS kuralları. |
 
-### 2. Sanal Ortam Oluşturun (Önerilen)
-```bash
-python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux / macOS:
-source venv/bin/activate
-```
+### Arayüz (`ui/qt/`)
+| Dosya | Sorumluluk |
+| :--- | :--- |
+| `ui/qt/app.py` | `QApplication` kurulumu, global kısayol köprüsü (`HotkeyBridge`), pencereleri yakalama dışı tutma döngüsü. |
+| `ui/qt/controller.py` | Motor yaşam döngüsü (`_build_ocr`, `_build_world_ocr`, `rebuild_ocr`, `cycle_patch_mode`, `toggle_freeze_scan`). |
+| `ui/qt/main_window.py` | Ana kontrol paneli: kaynak/pencere seçimi, yama modu seçici, istatistikler ve `Baslat`/`Durdur`. |
+| `ui/qt/patch_overlay.py` | `PatchOverlayWindow`: tüm ekranı kaplayan, tıklama geçirgen, DPI-duyarlı Buzlu Cam + Bukalemun yama ve `F7` Dondur rozeti çizicisi. |
+| `ui/qt/hud.py` & `ui/qt/subtitle_view.py` | Dinamik metin boyutuna göre daralıp genişleyen altyazı HUD penceresi, sürükle-bırak ve kilit (`F8`). |
+| `ui/qt/settings_window.py` | Görünüm, Bağımsız 1. Altyazı / 2. Dünya OCR ayarları, Çeviri (AutoLearn aç/kapat + önbellek temizle + API anahtarları) ve Kısayollar. |
+| `ui/qt/roi_selector.py`, `dictionary_window.py`, `chiaki_window.py`, `onboarding.py` | Bölge seçimi, sözlük yöneticisi, Chiaki PS5 kurulumu ve ilk kullanım sihirbazı. |
 
-### 3. Bağımlılıkları Yükleyin
-```bash
-pip install -r requirements.txt
-```
-> **Not:** GPU hızlandırmalı PaddleOCR kullanmak isterseniz sisteminize uygun [PaddlePaddle GPU](https://www.paddlepaddle.org.cn/) sürümünü kurabilirsiniz.
-
-#### ⚠️ Önemli: PaddlePaddle sürümü (OCR hızını 3-6 kat etkiler)
-`paddlepaddle 3.3.0 / 3.3.1` sürümlerinde oneDNN (MKLDNN) + PIR yürütücüsü çakışması var
-(`ConvertPirAttribute2RuntimeAttribute not support` → [Paddle#77340](https://github.com/PaddlePaddle/Paddle/issues/77340), [Paddle#79749](https://github.com/PaddlePaddle/Paddle/issues/79749)).
-Bu durumda OCR sessizce yavaş CPU moduna düşer. Çözüm:
-
-```bash
-pip install paddlepaddle==3.2.2
-```
-
-GPU kullanacaksanız (NVIDIA + CUDA 12.6):
-```bash
-pip install paddlepaddle-gpu==3.2.2 --index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
-pip install nvidia-cudnn-cu12==9.5.1.17 nvidia-cublas-cu12==12.6.4.1
-```
-Uygulama, GPU başlatılamazsa otomatik olarak CPU moduna döner.
-
-#### 📊 OCR hız ölçümü
-Kendi sisteminizde ölçmek için:
-```bash
-python tools/bench_ocr.py                # CPU (MKLDNN açık/kapalı)
-python tools/bench_ocr.py --device gpu   # GPU
-```
-
-Ölçüm sonuçları (960×120 altyazı görüntüsü, GTX 1660 Ti + i7 sınıfı CPU):
-
-| Model | paddle 3.3.1 (MKLDNN bozuk) | paddle 3.2.2 CPU + MKLDNN | GPU (CUDA 12.6) |
-| :--- | ---: | ---: | ---: |
-| PP-OCRv6 tiny | 283 ms | 69 ms | **27 ms** |
-| PP-OCRv6 small | 561 ms | 139 ms | **46 ms** |
-| PP-OCRv6 medium | 2198 ms | 367 ms | **70 ms** |
-
-Ayarlar → **OCR Ayarları** bölümünden model boyutu (tiny / small / medium) ve işlem birimi (CPU / GPU) seçilebilir.
-
-### 4. (İsteğe Bağlı) API Anahtarları
-Google Gemini AI kullanmak isterseniz `.env.example` dosyasını `.env` olarak kopyalayabilir veya uygulama içindeki Ayarlar (F11/Settings) menüsünden anahtarınızı girebilirsiniz:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-```
-
-### 5. (İsteğe Bağlı) Çevrimdışı Argos Translate Modelini İndirin
-İnternetsiz çeviri kullanmak istiyorsanız:
-```bash
-python tools/setup_argos.py
-```
+### Veri & Yapılandırma (`config/`, `data/`, `tools/`)
+- `config/settings.json`: Kalıcı kullanıcı ayarları (**Not:** API anahtarları repoya boş string olarak commit edilir; kendi anahtarlarınızı Ayarlar arayüzünden veya `.env` üzerinden girin).
+- `config/profiles.json` & `config/dictionaries.json`: Kaydedilmiş ROI profilleri ve sözlük kataloğu.
+- `data/`: Oyun sözlük veritabanları (`rdr2_ceviri.db`, `gta6_ceviri.db`, `nexus_golden.db`) ve çalışma zamanı önbelleği (`translation_cache.db`, `.gitignore` ile hariç tutulur).
 
 ---
 
-## 🎮 Kullanım
+## 5. Ayarlar (`config/settings.json`) & Kısayol Tuşları
 
-Uygulamayı başlatmak için kök dizinde şu komutu çalıştırın:
-
-```bash
-python main.py
-```
-
-### ⌨️ Klavye Kısayolları
-
+### Varsayılan Kısayollar
 | Tuş | İşlev |
 | :--- | :--- |
-| **F9** | Çeviriyi Başlat / Durdur |
-| **F10** | Yeni Çeviri Alanı (ROI) Seç |
-| **F11** | Minimal / Şeffaf Moda Geçiş |
-| **F8** | HUD Pencere Taşıma Modu |
-| **F12** | Güvenli Çıkış |
+| **`F6`** | Yama modunu değiştir (`full_patch` → `hybrid` → `subtitle_only`) |
+| **`F7`** | Anlık Dondur & Oku aç/kapat (tüm ekranı yüksek çözünürlükte sabitler ve çevirir) |
+| **`F8`** | HUD kilidi (tıklama geçirgenliğini aç/kapat) |
+| **`F9`** | Çeviriyi Başlat / Durdur |
+| **`F10`** | Ekrandan yeni bölge (ROI) seç |
+| **`F11`** | Ayarlar penceresini aç |
+| **`F12`** | Uygulamadan güvenli çıkış |
+
+### Önemli v3 Ayar Anahtarları (`core/config_manager.py`)
+```json
+{
+  "patch_mode": "full_patch",
+  "auto_subtitle_detect": true,
+  "chameleon_opacity": 78,
+  "auto_text_color": true,
+  "stabilization_frames": 2,
+  "world_scan_interval": 0.55,
+  "dual_ocr_enabled": true,
+  "paddle_version": "PP-OCRv6",
+  "ocr_model_size": "small",
+  "ocr_device": "gpu",
+  "world_paddle_version": "PP-OCRv6",
+  "world_ocr_model_size": "small",
+  "world_ocr_device": "cpu",
+  "use_mkldnn": true,
+  "auto_learn_enabled": false
+}
+```
+> DB olmadan saf AI modunda çalıştırmak için Ayarlar/Sözlük üzerinden veritabanını `"Yok"` (`db_path: ""`) veya `data/gta6_ceviri.db` seçebilirsiniz.
+
+---
+
+## 6. Bilinen Donanım / PaddleOCR Notları & Kurulum
+
+1. **PaddlePaddle 3.3.x oneDNN/PIR Hatası:**
+   - `paddlepaddle>=3.3.0` sürümlerinde CPU MKLDNN açıkken `ConvertPirAttribute2RuntimeAttribute` hatası oluşabiliyor.
+   - `OCREngine` bu hatayı ilk ön-ısınma (`_dummy_image()`) sırasında yakalayıp otomatik düz CPU moduna düşer; kalıcı olarak yüksek CPU MKLDNN hızı almak için **`paddlepaddle==3.2.2`** kullanın.
+2. **GPU (CUDA / cuDNN 9) Kurulumu:**
+   - Windows'ta GPU OCR için `paddlepaddle-gpu==3.2.2` ve `nvidia-cudnn-cu12`, `nvidia-cublas-cu12` paketleri gereklidir (`core/ocr_engine.py`, Windows `os.add_dll_directory` ile NVIDIA site-packages DLL yollarını otomatik ekler). GPU bulunamazsa otomatik CPU fallback yapılır.
+3. **API Anahtarları & Güvenlik:**
+   - Groq (`GROQ_API_KEY`) ve Gemini (`GEMINI_API_KEY`) anahtarları `.env` dosyasında veya yerel `config/settings.json` içinde tutulabilir; `.env` `.gitignore` ile korunur.

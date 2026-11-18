@@ -23,6 +23,19 @@ def _pil_available() -> bool:
         return False
 
 
+def _virtual_screen_origin() -> tuple[int, int]:
+    """Windows çoklu monitör düzeninde sanal masaüstünün sol-üst koordinatı."""
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            return int(u.GetSystemMetrics(76)), int(u.GetSystemMetrics(77))
+        except Exception:
+            pass
+    return (0, 0)
+
+
 class ScreenSource:
     """PC ekranından (veya seçili bölgeden) görüntü yakalar."""
 
@@ -30,6 +43,7 @@ class ScreenSource:
 
     def __init__(self):
         self._warned = False
+        self.last_origin = (0, 0)
 
     def grab(self, roi=None):
         """
@@ -44,8 +58,10 @@ class ScreenSource:
                     return None
                 box = (x, y, x + w, y + h)
                 img = ImageGrab.grab(bbox=box, all_screens=True)
+                self.last_origin = (x, y)
             else:
                 img = ImageGrab.grab(all_screens=True)
+                self.last_origin = _virtual_screen_origin()
             # RGB → BGR (OpenCV/PaddleOCR uyumu)
             arr = np.asarray(img, dtype=np.uint8)
             if arr.ndim == 3 and arr.shape[2] >= 3:

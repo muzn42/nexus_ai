@@ -23,6 +23,8 @@ from ui.qt.main_window import MainWindow
 class HotkeyBridge(QObject):
     """Kısayol thread'inden gelen çağrıları GUI thread'ine taşır."""
 
+    mode_cycle = Signal()
+    freeze_toggle = Signal()
     start_toggle = Signal()
     reselect = Signal()
     settings = Signal()
@@ -95,6 +97,8 @@ def main() -> int:
         if controller.hud:
             controller.hud.set_locked(not controller.hud.locked)
 
+    bridge.mode_cycle.connect(controller.cycle_patch_mode)
+    bridge.freeze_toggle.connect(controller.toggle_freeze_scan)
     bridge.start_toggle.connect(controller.toggle)
     bridge.reselect.connect(win._select_area)
     bridge.settings.connect(win._open_settings)
@@ -103,6 +107,8 @@ def main() -> int:
 
     s = controller.settings
     controller.start_hotkeys({
+        s.get("hotkey_mode", "f6"): bridge.mode_cycle.emit,
+        s.get("hotkey_freeze", "f7"): bridge.freeze_toggle.emit,
         s.get("hotkey_start", "f9"): bridge.start_toggle.emit,
         s.get("hotkey_reselect", "f10"): bridge.reselect.emit,
         s.get("hotkey_settings", "f11"): bridge.settings.emit,

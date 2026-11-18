@@ -26,6 +26,18 @@
             "size_hint": ""
         },
         {
+            "id": "rdr2_ceviri1",
+            "game": "Red Dead Redemption 2 (1)",
+            "lang_from": "en",
+            "lang_to": "tr",
+            "filename": "rdr2_ceviri1.db",
+            "source_url": "",
+            "note": "Yerel dosya • 94,590 satır",
+            "license": "",
+            "version": "",
+            "size_hint": ""
+        },
+        {
             "id": "rdr2_ceviri",
             "game": "Red Dead Redemption 2",
             "lang_from": "en",
@@ -38,13 +50,13 @@
             "size_hint": ""
         },
         {
-            "id": "rdr2_ceviri1",
-            "game": "Red Dead Redemption 2 (1)",
+            "id": "gta6_ceviri",
+            "game": "Gta6 Ceviri",
             "lang_from": "en",
             "lang_to": "tr",
-            "filename": "rdr2_ceviri1.db",
+            "filename": "gta6_ceviri.db",
             "source_url": "",
-            "note": "Yerel dosya • 94,590 satır",
+            "note": "Yerel dosya • 31 satır",
             "license": "",
             "version": "",
             "size_hint": ""

@@ -36,6 +36,8 @@ class SubtitleView(QWidget):
         if text != self._text:
             self._text = text
             self.update()
+            if self.parentWidget() is not None:
+                self.parentWidget().update()
 
     def text(self) -> str:
         return self._text
@@ -77,6 +79,37 @@ class SubtitleView(QWidget):
             lines[-1] = last + "…"
         return lines
 
+    def compute_layout(self) -> tuple[QFont, QFontMetricsF, list[str], float, float]:
+        """Aktif yazı için font, metrikler, satırlar ve toplam yüksekliği hesaplar."""
+        font = QFont(self._font_family, self._font_size)
+        font.setWeight(QFont.DemiBold)
+        metrics = QFontMetricsF(font)
+
+        pad = max(8, self._stroke_width * 2 + 4)
+        avail = max(40.0, self.width() - pad * 2)
+        lines = self._wrap(self._text, metrics, avail)
+        line_h = metrics.height() * self._line_spacing
+        total_h = line_h * len(lines)
+        return font, metrics, lines, line_h, total_h
+
+    def text_box_rect(self) -> QRectF | None:
+        """Opak/Yarı Saydam HUD arka planı için yalnızca yazıyı saran dinamik kutu."""
+        if not self._text or not self._text.strip() or self.width() <= 0 or self.height() <= 0:
+            return None
+        _, metrics, lines, _, total_h = self.compute_layout()
+        non_empty = [ln for ln in lines if ln.strip()]
+        if not non_empty:
+            return None
+
+        max_line_w = max((metrics.horizontalAdvance(ln) for ln in non_empty), default=0.0)
+        pad_x = max(18.0, self._font_size * 0.65 + self._stroke_width * 2)
+        pad_y = max(10.0, self._font_size * 0.35 + self._stroke_width * 2)
+        bw = min(float(self.width()), max_line_w + pad_x * 2)
+        bh = min(float(self.height()), total_h + pad_y * 2)
+        bx = (self.width() - bw) / 2.0
+        by = (self.height() - bh) / 2.0
+        return QRectF(bx, by, bw, bh)
+
     def paintEvent(self, event):
         if not self._text:
             return
@@ -85,17 +118,9 @@ class SubtitleView(QWidget):
             QPainter.Antialiasing | QPainter.TextAntialiasing |
             QPainter.SmoothPixmapTransform, True)
 
-        font = QFont(self._font_family, self._font_size)
-        font.setWeight(QFont.DemiBold)
+        font, metrics, lines, line_h, total_h = self.compute_layout()
         painter.setFont(font)
-        metrics = QFontMetricsF(font)
 
-        pad = max(8, self._stroke_width * 2 + 4)
-        avail = max(40.0, self.width() - pad * 2)
-        lines = self._wrap(self._text, metrics, avail)
-
-        line_h = metrics.height() * self._line_spacing
-        total_h = line_h * len(lines)
         start_y = (self.height() - total_h) / 2.0 + metrics.ascent()
 
         # Gölge (hafif, okunabilirliği artırır)

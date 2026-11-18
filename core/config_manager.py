@@ -42,22 +42,37 @@ DEFAULT_SETTINGS = {
     "gemini_api_key": "",
     "evren_api_key": "",
     "db_path": os.path.join(DATA_DIR, "rdr2_ceviri.db"),
-    "auto_learn_enabled": True,
+    "auto_learn_enabled": False,
 
-    # OCR
-    "paddle_version": "PP-OCRv5",
+    # OCR (1: Altyazı hızlı hat · 2: Dünya/menü paralel hat)
+    "paddle_version": "PP-OCRv6",
     "ocr_model_size": "small",
-    "ocr_device": "cpu",
+    "ocr_device": "gpu",
+    "dual_ocr_enabled": True,
+    "world_paddle_version": "PP-OCRv6",
+    "world_ocr_model_size": "small",
+    "world_ocr_device": "cpu",
     "use_mkldnn": True,
 
     # Algılama
     "smart_filter_enabled": False,
+
+    # Canlı Yama (v3 In-Place)
+    "patch_mode": "full_patch",       # full_patch | hybrid | subtitle_only
+    "auto_subtitle_detect": True,
+    "chameleon_opacity": 78,          # Bukalemun maske opaklığı (%)
+    "auto_text_color": True,
+    "noise_filter_enabled": True,
+    "stabilization_frames": 2,
+    "world_scan_interval": 0.55,      # Altyazı dışı dünya/UI tarama aralığı (sn)
 
     # Kaynak
     "source_type": "screen",
     "camera_index": 0,
 
     # Kısayollar
+    "hotkey_mode": "f6",
+    "hotkey_freeze": "f7",
     "hotkey_start": "f9",
     "hotkey_reselect": "f10",
     "hotkey_settings": "f11",

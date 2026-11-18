@@ -6,6 +6,7 @@ Birden fazla OpenAI uyumlu sağlayıcıyı sırayla dener:
   - Kota/aşırı yük (429/503) veya zaman aşımında model bir süre "soğumaya" alınır,
     sıradaki modele geçilir. 404 (model kaldırılmış) olan model oturum boyunca kapatılır.
 """
+import re
 import time
 import threading
 
@@ -24,10 +25,27 @@ DEFAULT_CHAIN = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are a video game subtitle translator. Translate the LAST line into {lang}. "
+    "You are an expert video game localization translator for open-world games like GTA 6 and RDR2. "
+    "Translate the LAST line into natural, cinematic, fluent {lang} that feels like an official Turkish game patch. "
     "Previous lines are context only, do not translate them. "
-    "Keep names as they are. Output ONLY the translation of the last line, "
-    "without quotes, notes or explanations."
+    "CRITICAL RULES:\n"
+    "1. NEVER translate proper nouns: character names (Lucia, Jason, Arthur, Dutch, etc.), "
+    "cities/neighborhoods/streets (Vice City, Leonida, Ocean Beach, Vice Beach, etc.), "
+    "vehicle/weapon models, and in-game brands (LifeInvader, Weazel News, Sprunk, etc.) MUST stay in their original spelling.\n"
+    "2. If the text consists ONLY of a proper noun, place name, or brand name, output it EXACTLY as-is.\n"
+    "3. Keep key/button tags like [E], [F], [SPACE], [R1], [LSHIFT] unchanged.\n"
+    "4. Output ONLY the translation of the last line, without quotes, notes, or explanations."
+)
+
+BATCH_SYSTEM_PROMPT = (
+    "You are an expert video game localization translator for open-world games like GTA 6 and RDR2. "
+    "Translate each numbered line below into natural, cinematic, fluent {lang} as an official game patch.\n"
+    "CRITICAL RULES:\n"
+    "1. NEVER translate proper nouns: character names, cities/regions/streets (Vice City, Leonida, Ocean Beach, Vice Beach, etc.), "
+    "vehicle/weapon models, or in-game brands (LifeInvader, Weazel News, Sprunk, etc.) MUST stay unchanged.\n"
+    "2. If a numbered item is ONLY a proper noun/place/brand, keep it EXACTLY unchanged.\n"
+    "3. Preserve button/key prompts like [E], [F], [SPACE], [R1] as-is.\n"
+    "4. Keep the EXACT same numbering format ([1] ..., [2] ...) with one translation per item. No extra commentary."
 )
 
 
@@ -131,6 +149,71 @@ class LLMChain:
                 self.last_error = f"{label}: {reason}"
                 print(f"[ZİNCİR] {label} atlandı -> {reason}")
         return None, ""
+
+    @staticmethod
+    def _parse_batch_response(raw: str, expected_count: int) -> list:
+        """'[1] ...\\n[2] ...' biçimli toplu cevabı sıra garantili listeye ayrıştırır."""
+        lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+        parsed = {}
+        cur_idx = None
+        for ln in lines:
+            m = re.match(r"^(?:\[(\d+)\]|(\d+)[\.\)\:])\s*(.*)$", ln)
+            if m:
+                idx = int(m.group(1) or m.group(2))
+                cur_idx = idx
+                parsed[idx] = m.group(3).strip().strip('"')
+            elif cur_idx is not None:
+                parsed[cur_idx] = (parsed[cur_idx] + " " + ln).strip()
+
+        if len(parsed) == expected_count and all(i in parsed for i in range(1, expected_count + 1)):
+            return [parsed[i] for i in range(1, expected_count + 1)]
+        if len(lines) == expected_count:
+            return [re.sub(r"^(?:\[\d+\]|\d+[\.\)\:])\s*", "", ln).strip('"') for ln in lines]
+        # Eksik satır varsa yine de eşleşenleri doldur
+        if parsed:
+            return [parsed.get(i + 1, "") for i in range(expected_count)]
+        return []
+
+    def translate_batch(self, texts: list[str], lang: str) -> tuple[list[str], str]:
+        """
+        Birden çok metni tek bir LLM isteğinde çevirir.
+        Döner: (çeviri_listesi, etiket) ya da başarısızsa ([], "").
+        """
+        if not texts:
+            return [], ""
+        if len(texts) == 1:
+            res, label = self.translate(texts[0], [], lang)
+            return ([res] if res else []), label
+
+        numbered = "\n".join(f"[{i + 1}] {t}" for i, t in enumerate(texts))
+        messages = [
+            {"role": "system", "content": BATCH_SYSTEM_PROMPT.format(lang=lang)},
+            {"role": "user", "content": numbered},
+        ]
+
+        for label, model, base, key_name, extra in self.chain:
+            key = self.keys.get(key_name, "")
+            if not key or not self._available(model):
+                continue
+            try:
+                resp = self._client(base, key).chat.completions.create(
+                    model=model, messages=messages, stream=False,
+                    temperature=0.2, max_tokens=max(400, len(texts) * 90), **extra)
+                content = ""
+                if resp and resp.choices:
+                    content = (resp.choices[0].message.content or "").strip()
+                out = self._parse_batch_response(content, len(texts))
+                if out and any(out):
+                    self.last_model = label
+                    self.last_error = ""
+                    return out, label
+                self._penalize(model, Exception("toplu cevap ayrıştırılamadı"))
+            except Exception as e:
+                with self._lock:
+                    reason = self._penalize(model, e)
+                self.last_error = f"{label}: {reason}"
+                print(f"[ZİNCİR BATCH] {label} atlandı -> {reason}")
+        return [], ""
 
     def status(self) -> str:
         now = time.time()

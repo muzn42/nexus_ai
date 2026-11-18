@@ -65,6 +65,8 @@ class MainWindow(FramelessWindow):
         self.c.roi_changed.connect(self._on_roi)
         self.c.toast.connect(self._show_toast)
         self.c.dict_changed.connect(lambda *_: self._refresh_dict_card())
+        self.c.mode_changed.connect(self._on_mode_changed)
+        self.c.freeze_changed.connect(self._on_freeze_changed)
 
         self._refresh_all()
         # Kamera portlarını arka planda tara (açılışı bloklamaz)
@@ -82,7 +84,7 @@ class MainWindow(FramelessWindow):
         ll.addWidget(self.status_chip, 0, Qt.AlignLeft)
         self.hero_title = label("Başlamaya hazır", size=15, bold=True)
         ll.addWidget(self.hero_title)
-        self.hero_sub = label("Adımları tamamlayıp Başlat'a basın.", "muted",
+        self.hero_sub = label("Alan seçmen gerekmez — Başlat'a basıp oyuna geçebilirsin.", "muted",
                               size=9, wrap=True)
         ll.addWidget(self.hero_sub)
         hero.addWidget(left, 1)
@@ -92,13 +94,22 @@ class MainWindow(FramelessWindow):
         self.btn_start = QPushButton("▶   Başlat")
         self.btn_start.setProperty("variant", "primary")
         self.btn_start.setMinimumHeight(46)
-        self.btn_start.setMinimumWidth(180)
+        self.btn_start.setMinimumWidth(190)
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self._toggle)
         btns.addWidget(self.btn_start)
 
-        self.btn_area = QPushButton("▣   Alan Seç")
-        self.btn_area.setMinimumHeight(38)
+        self.btn_freeze = QPushButton("❄   Dondur & Oku (F7)")
+        self.btn_freeze.setMinimumHeight(36)
+        self.btn_freeze.setCursor(Qt.PointingHandCursor)
+        self.btn_freeze.setToolTip(
+            "Menü, gazete veya telefon mesajı çıktığında ekranı tam çözünürlükte çevirir.")
+        self.btn_freeze.clicked.connect(self.c.toggle_freeze_scan)
+        btns.addWidget(self.btn_freeze)
+
+        self.btn_area = QPushButton("▣   Altyazı Alanı Seç")
+        self.btn_area.setMinimumHeight(34)
+        self.btn_area.setProperty("variant", "ghost")
         self.btn_area.setCursor(Qt.PointingHandCursor)
         self.btn_area.clicked.connect(self._select_area)
         btns.addWidget(self.btn_area)
@@ -109,7 +120,7 @@ class MainWindow(FramelessWindow):
         self.btn_hud.setProperty("variant", "ghost")
         self.btn_hud.setCursor(Qt.PointingHandCursor)
         self.btn_hud.setToolTip(
-            "Altyazı katmanını göster/gizle. Göründüğünde fareyle taşıyabilirsin.")
+            "Hibrit / Altyazı modundaki alt altyazı katmanını göster/gizle.")
         self.btn_hud.clicked.connect(self._toggle_hud_visible)
         btns.addWidget(self.btn_hud)
         hero.addLayout(btns)
@@ -182,17 +193,47 @@ class MainWindow(FramelessWindow):
         card.add(self.window_label)
         self.col.addWidget(card)
 
-    # ------------------------------------------------------------ 2) alan
+    # ------------------------------------------------------------ 2) mod ve alan
+    PATCH_MODE_ITEMS = [
+        ("full_patch", "Tam Yama (Her Yerdeki Yazılar + Otomatik Altyazı)"),
+        ("hybrid", "Hibrit (Altyazılar Alt HUD'da + Diğer Yazılar Yerinde)"),
+        ("subtitle_only", "Sadece Altyazı (Otomatik Alt Bant veya Seçili Alan)"),
+    ]
+
     def _build_area_card(self):
-        card = Card("2 · Çeviri alanı",
-                    "Altyazının ekranda göründüğü dikdörtgen bölge.")
+        card = Card("2 · Çeviri modu ve alanı",
+                    "Alan seçmek zorunlu değildir — oyun içindeki tüm yazılar ve altyazılar otomatik algılanır.")
+
+        from PySide6.QtWidgets import QComboBox
+        mrow = QHBoxLayout()
+        mrow.setSpacing(S.SM)
+        mrow.addWidget(label("Çeviri Modu:", size=10, bold=True))
+        self.combo_mode = QComboBox()
+        for _key, lbl in self.PATCH_MODE_ITEMS:
+            self.combo_mode.addItem(lbl)
+        self.combo_mode.setMinimumWidth(340)
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_combo_change)
+        mrow.addWidget(self.combo_mode, 1)
+        card.add_layout(mrow)
+
+        card.add(Divider())
+
         row = QHBoxLayout()
         row.setSpacing(S.SM)
 
-        self.roi_label = label("Henüz alan seçilmedi", "muted", size=10)
+        self.roi_label = label(
+            "Otomatik Algılama Aktif (İsteğe bağlı özel altyazı alanı seçebilirsiniz)",
+            "muted", size=10, wrap=True)
         row.addWidget(self.roi_label, 1)
 
-        self.btn_select_roi = QPushButton("Alan Seç")
+        self.btn_clear_roi = QPushButton("Otomatiğe Dön")
+        self.btn_clear_roi.setProperty("variant", "ghost")
+        self.btn_clear_roi.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_roi.clicked.connect(lambda: self.c.set_roi(None))
+        self.btn_clear_roi.hide()
+        row.addWidget(self.btn_clear_roi)
+
+        self.btn_select_roi = QPushButton("Altyazı Alanı Seç")
         self.btn_select_roi.setCursor(Qt.PointingHandCursor)
         self.btn_select_roi.clicked.connect(self._select_area)
         row.addWidget(self.btn_select_roi)
@@ -201,7 +242,6 @@ class MainWindow(FramelessWindow):
         # kayıtlı profiller
         prow = QHBoxLayout()
         prow.setSpacing(S.SM)
-        from PySide6.QtWidgets import QComboBox
         self.combo_profile = QComboBox()
         self.combo_profile.setMinimumWidth(240)
         self.combo_profile.currentIndexChanged.connect(self._on_profile_change)
@@ -273,14 +313,17 @@ class MainWindow(FramelessWindow):
         row.addWidget(btn_help)
 
         row.addStretch(1)
-        self.footer_note = label("F9 başlat/durdur · F10 alan · F11 ayarlar · F12 çıkış",
-                                "faint", size=8)
+        self.footer_note = label(
+            "F6 mod · F7 dondur/oku · F9 başlat/durdur · F10 alan · F11 ayarlar · F12 çıkış",
+            "faint", size=8)
         row.addWidget(self.footer_note)
         self.content_lay.addLayout(row)
 
     # ------------------------------------------------------------ yenileme
     def _refresh_all(self):
         s = self.c.settings
+        # mod
+        self._on_mode_changed(s.get("patch_mode", "full_patch"))
         # kaynak
         idx = self.combo_source.findText(self._source_text_from_settings())
         if idx >= 0:
@@ -361,19 +404,41 @@ class MainWindow(FramelessWindow):
         self.combo_profile.blockSignals(False)
 
     # ------------------------------------------------------------ olaylar
+    def _on_mode_combo_change(self, index):
+        if 0 <= index < len(self.PATCH_MODE_ITEMS):
+            mode_key = self.PATCH_MODE_ITEMS[index][0]
+            self.c.set_patch_mode(mode_key)
+
+    def _on_mode_changed(self, mode_key):
+        idx = 0
+        for i, (k, _) in enumerate(self.PATCH_MODE_ITEMS):
+            if k == mode_key:
+                idx = i
+                break
+        if hasattr(self, "combo_mode"):
+            self.combo_mode.blockSignals(True)
+            self.combo_mode.setCurrentIndex(idx)
+            self.combo_mode.blockSignals(False)
+
+    def _on_freeze_changed(self, frozen):
+        if hasattr(self, "btn_freeze"):
+            self.btn_freeze.setText(
+                "▶   Canlı Moda Dön (F7)" if frozen else "❄   Dondur & Oku (F7)")
+
     def _toggle(self):
         if self.c.pipeline and self.c.pipeline.is_running:
             self.c.pause()
             return
-        # Alan seçilmemişse kullanıcıyı doğrudan seçime götür
-        if not self.c.roi:
-            self._show_toast("Önce altyazı alanını seçelim.", "warn")
-            self._select_area()
-            return
+        mode = self.c.settings.get("patch_mode", "full_patch")
         if self.c.start():
-            self._show_hud()
-            self._show_toast("Çeviri başladı. Altyazı katmanı oyunun üstünde.",
-                             "ok")
+            if mode == "full_patch":
+                if self.c.hud:
+                    self.c.hud.hide()
+                    self._sync_hud_button()
+                self._show_toast("Canlı Oyun Yaması başladı (F6 mod · F7 dondur/oku).", "ok")
+            else:
+                self._show_hud()
+                self._show_toast("Çeviri başladı. Altyazı katmanı oyunun üstünde.", "ok")
 
     def _show_hud(self):
         from ui.qt.hud import HUDWindow
@@ -474,16 +539,25 @@ class MainWindow(FramelessWindow):
         self.stat_tr._value.setText(f"{stats.get('tr_ms', 0):.0f} ms")
         if self.c.hud:
             self.c.hud.set_state("running", f"{stats.get('ocr_ms', 0):.0f}ms")
+        boxes_n = stats.get("boxes")
+        box_info = f" · {boxes_n} yama" if boxes_n else ""
         self.hero_sub.setText(
             f"OCR {stats.get('ocr_ms', 0):.0f} ms · çeviri "
-            f"{stats.get('tr_ms', 0):.0f} ms · kaynak: {stats.get('source', '—')}")
+            f"{stats.get('tr_ms', 0):.0f} ms · kaynak: {stats.get('source', '—')}{box_info}")
+        if stats.get("last_text") is not None:
+            self.last_text_label.setText(stats["last_text"] or "—")
 
     def _on_roi(self, roi):
         if not roi:
-            self.roi_label.setText("Henüz alan seçilmedi")
+            self.roi_label.setText(
+                "Otomatik Algılama Aktif (Alan seçimi gerekmez · İsteğe bağlı özel altyazı alanı seçebilirsiniz)")
+            if hasattr(self, "btn_clear_roi"):
+                self.btn_clear_roi.hide()
             return
         x, y, w, h = roi
-        self.roi_label.setText(f"{w} × {h} piksel  ·  konum ({x}, {y})")
+        self.roi_label.setText(f"Özel Altyazı Alanı: {w} × {h} piksel  ·  konum ({x}, {y})")
+        if hasattr(self, "btn_clear_roi"):
+            self.btn_clear_roi.show()
 
     def _show_toast(self, message, tone="neutral"):
         self.toast.show_message(message, tone)
