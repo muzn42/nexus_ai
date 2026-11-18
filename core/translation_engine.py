@@ -4,8 +4,11 @@ Veritabanı → Öğrenilmiş Cache → Online Motor hibrit akışı.
 Her çevirinin kaynağını izler, istatistik tutar ve sonuçları önbelleğe alır.
 """
 import os
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from core.db_manager import DBManager, AutoLearnDB
+from core.llm_chain import LLMChain
+
+ENGINE_CHAIN = "Akıllı Zincir (GPT-OSS → Gemini)"
 
 
 # Çeviri kaynağı sabitleri
@@ -16,6 +19,8 @@ SOURCE_CACHE = "ÖNB"
 SOURCE_GOOGLE = "GT"
 SOURCE_ARGOS = "ARG"
 SOURCE_GEMINI = "GEM"
+SOURCE_GROQ = "GROQ"
+SOURCE_CHAIN = "ZİNCİR"
 
 
 class TranslationEngine:
@@ -25,13 +30,15 @@ class TranslationEngine:
       2. Altın Veritabanı (NVIDIA AI Süzülmüş) (0 ms)
       3. Yerel Oyun Veritabanı (0 ms)
       4. Otomatik Öğrenme DB (0 ms)
-      5. Seçili Online/Offline Motor (Google / Argos / Gemini)
+      5. Seçili Online/Offline Motor (Groq / Google / Argos / Gemini)
     """
 
     def __init__(self, db_manager: DBManager, auto_learn_db: AutoLearnDB,
-                 fallback_engine: str = "Google Translate (Ücretsiz)",
+                 fallback_engine: str = "Groq AI (Qwen 27B)",
                  target_language: str = "Türkçe",
                  gemini_api_key: str = "",
+                 groq_api_key: str = "",
+                 evren_api_key: str = "",
                  auto_learn_enabled: bool = True):
 
         self.db_manager = db_manager
@@ -39,6 +46,8 @@ class TranslationEngine:
         self.fallback_engine = fallback_engine
         self.target_language = target_language
         self.gemini_api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+        self.groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "").strip()
+        self.evren_api_key = evren_api_key or os.environ.get("EVREN_API_KEY", "").strip()
         self.auto_learn_enabled = auto_learn_enabled
 
         # Bellek içi çeviri cache (LRU, max 500)
@@ -54,19 +63,45 @@ class TranslationEngine:
             SOURCE_GOOGLE: 0,
             SOURCE_ARGOS: 0,
             SOURCE_GEMINI: 0,
+            SOURCE_GROQ: 0,
+            SOURCE_CHAIN: 0,
         }
 
         # Lazy-init motor referansları
         self._google_translator = None
+        self._google_lang = None
         self._gemini_model = None
+        self._groq_client = None
+        self._session = None  # requests.Session — her çağrıda SSL/TCP handshake tekrarını önler
+
+        # Akıllı zincir + kayan pencere (son 3 altyazı bağlam olarak gönderilir)
+        self.chain = LLMChain({"groq_api_key": self.groq_api_key,
+                               "gemini_api_key": self.gemini_api_key,
+                               "evren_api_key": self.evren_api_key})
+        self.context = deque(maxlen=3)
+
+    def set_keys(self, groq_api_key=None, gemini_api_key=None, evren_api_key=None):
+        """Ayarlardan anahtar değişince motoru ve zinciri güncelle."""
+        if groq_api_key is not None:
+            self.groq_api_key = groq_api_key
+            self._groq_client = None
+        if gemini_api_key is not None:
+            self.gemini_api_key = gemini_api_key
+            self._gemini_model = None
+        if evren_api_key is not None:
+            self.evren_api_key = evren_api_key
+        self.chain.update_keys(groq_api_key=self.groq_api_key,
+                               gemini_api_key=self.gemini_api_key,
+                               evren_api_key=self.evren_api_key)
 
     @property
     def total_translations(self) -> int:
         return sum(self.stats.values())
 
-    def translate(self, text: str) -> tuple[str, str]:
+    def translate(self, text: str, on_partial=None) -> tuple[str, str]:
         """
         Metni çevirir.
+        on_partial(metin): Akıllı Zincir'de SSE ile gelen kısmi çeviri (isteğe bağlı).
         Returns: (çeviri, kaynak_etiketi) — ör: ("Merhaba", "ALTIN")
         """
         if not text or not text.strip():
@@ -74,7 +109,14 @@ class TranslationEngine:
 
         clean_text = text.strip()
         cache_key = clean_text.lower()
+        try:
+            return self._translate_inner(clean_text, cache_key, on_partial)
+        finally:
+            # Kayan pencere: hangi kaynaktan çevrilirse çevrilsin bağlama ekle
+            if not self.context or self.context[-1] != clean_text:
+                self.context.append(clean_text)
 
+    def _translate_inner(self, clean_text: str, cache_key: str, on_partial):
         # 1. Bellek Cache
         if cache_key in self._cache:
             self.stats[SOURCE_CACHE] += 1
@@ -98,8 +140,8 @@ class TranslationEngine:
             return learned, SOURCE_LEARNED
 
         # 4. Online / Offline Yedek Motor
-        translated, source = self._fallback_translate(clean_text)
-        self.stats[source] += 1
+        translated, source = self._fallback_translate(clean_text, on_partial)
+        self.stats[source] = self.stats.get(source, 0) + 1
         self._add_to_cache(cache_key, translated)
 
         # Otomatik öğrenme: Online çeviriyi yerel DB'ye kaydet
@@ -113,31 +155,106 @@ class TranslationEngine:
             self._cache.popitem(last=False)
         self._cache[key] = value
 
-    def _fallback_translate(self, text: str) -> tuple[str, str]:
+    def _fallback_translate(self, text: str, on_partial=None) -> tuple[str, str]:
         """Seçili yedek motoru kullanarak çevir."""
         engine = self.fallback_engine
 
-        if engine == "Google Translate (Ücretsiz)":
+        if engine == ENGINE_CHAIN:
+            result, label = self.chain.translate(
+                text, list(self.context), self.target_language, on_partial)
+            if result:
+                return result, label
+            # Zincirdeki tüm modeller kotada/meşgulse oyunu bekletmeden Google'a düş
+            return self._translate_google(text), SOURCE_GOOGLE
+        elif engine == "Groq AI (Qwen 27B)":
+            return self._translate_groq(text), SOURCE_GROQ
+        elif engine == "Google Translate (Ücretsiz)":
             return self._translate_google(text), SOURCE_GOOGLE
         elif engine == "Argos Translate (Çevrimdışı)":
             return self._translate_argos(text), SOURCE_ARGOS
         elif engine == "Gemini AI":
             return self._translate_gemini(text), SOURCE_GEMINI
         else:
-            return self._translate_google(text), SOURCE_GOOGLE
+            return self._translate_groq(text), SOURCE_GROQ
+
+    # --- GROQ AI (Lazy Import) ---
+    def _translate_groq(self, text: str) -> str:
+        if not self.groq_api_key:
+            return "[Hata] Groq API Anahtarı girilmedi"
+        lang_name = self.target_language
+        system_prompt = f"You are a game subtitle translator. Translate English to {lang_name}. Output ONLY the translation without quotes, notes, or explanations."
+        try:
+            from openai import OpenAI
+            if self._groq_client is None:
+                self._groq_client = OpenAI(
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=self.groq_api_key,
+                    timeout=10.0
+                )
+            response = self._groq_client.chat.completions.create(
+                model="qwen/qwen3.8-27b",
+                temperature=0.2,
+                max_tokens=80,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}
+                ]
+            )
+            return response.choices[0].message.content.strip()
+        except ImportError:
+            # openai kütüphanesi yoksa doğrudan requests ile çağır
+            try:
+                headers = {
+                    "Authorization": f"Bearer {self.groq_api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": "qwen/qwen3.8-27b",
+                    "temperature": 0.2,
+                    "max_tokens": 80,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text}
+                    ]
+                }
+                r = self._http().post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=8.0)
+                if r.status_code == 200:
+                    data = r.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    print(f"[GROQ HTTP] Hata: {r.status_code} {r.text}")
+                    return self._translate_google(text)
+            except Exception as req_err:
+                print(f"[GROQ Requests] Hata: {req_err}")
+                return self._translate_google(text)
+        except Exception as e:
+            print(f"[GROQ] Hata: {e}")
+            return self._translate_google(text)
 
     # --- GOOGLE TRANSLATE ---
     def _translate_google(self, text: str) -> str:
         try:
             from deep_translator import GoogleTranslator
             lang_code = self._lang_code()
-            result = GoogleTranslator(source='auto', target=lang_code).translate(text)
+            # Çevirmen nesnesi (ve altındaki requests oturumu) yeniden kullanılır
+            if self._google_translator is None or self._google_lang != lang_code:
+                self._google_translator = GoogleTranslator(source="auto", target=lang_code)
+                self._google_lang = lang_code
+            result = self._google_translator.translate(text)
             return result if result else text
         except ImportError:
             return "[Hata] deep-translator paketi yüklü değil"
         except Exception as e:
             print(f"[GT] Hata: {e}")
+            self._google_translator = None
             return text
+
+    def _http(self):
+        """Tekil requests oturumu (bağlantı havuzu + SSL yeniden kullanımı)."""
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
+        return self._session
 
     # --- ARGOS TRANSLATE ---
     def _translate_argos(self, text: str) -> str:
@@ -161,7 +278,7 @@ class TranslationEngine:
 
             if self._gemini_model is None:
                 genai.configure(api_key=self.gemini_api_key)
-                self._gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+                self._gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
             lang_name = self.target_language
             prompt = (
@@ -195,4 +312,11 @@ class TranslationEngine:
         if self.stats[SOURCE_GOOGLE]: parts.append(f"GT:{self.stats[SOURCE_GOOGLE]}")
         if self.stats[SOURCE_ARGOS]: parts.append(f"Arg:{self.stats[SOURCE_ARGOS]}")
         if self.stats[SOURCE_GEMINI]: parts.append(f"Gem:{self.stats[SOURCE_GEMINI]}")
+        if self.stats.get(SOURCE_GROQ): parts.append(f"Groq:{self.stats[SOURCE_GROQ]}")
+        # Akıllı zincir modelleri (GPT-OSS, G3.1L, G3.8 ...)
+        known = {SOURCE_GOLDEN, SOURCE_DB, SOURCE_LEARNED, SOURCE_CACHE, SOURCE_GOOGLE,
+                 SOURCE_ARGOS, SOURCE_GEMINI, SOURCE_GROQ, SOURCE_CHAIN}
+        for k, v in self.stats.items():
+            if k not in known and v:
+                parts.append(f"{k}:{v}")
         return " | ".join(parts) if parts else "Henüz çeviri yok"

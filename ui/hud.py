@@ -50,14 +50,18 @@ class TranslationApp:
         self.auto_learn_db = AutoLearnDB(DATA_DIR)
         self.ocr_engine = OCREngine(
             version=s.get("paddle_version", "PP-OCRv5"),
-            use_mkldnn=s.get("use_mkldnn", True)
+            use_mkldnn=s.get("use_mkldnn", True),
+            model_size=s.get("ocr_model_size", "small"),
+            device=s.get("ocr_device", "cpu"),
         )
         self.translation_engine = TranslationEngine(
             db_manager=self.db_manager,
             auto_learn_db=self.auto_learn_db,
-            fallback_engine=s.get("fallback_engine", "Google Translate (Ücretsiz)"),
+            fallback_engine=s.get("fallback_engine", "Akıllı Zincir (GPT-OSS → Gemini)"),
             target_language=s.get("target_language", "Türkçe"),
             gemini_api_key=s.get("gemini_api_key", ""),
+            groq_api_key=s.get("groq_api_key", ""),
+            evren_api_key=s.get("evren_api_key", ""),
             auto_learn_enabled=s.get("auto_learn_enabled", True),
         )
 
@@ -505,8 +509,17 @@ class TranslationApp:
                     if not is_similar(full_text, last_ocr_text):
                         last_ocr_text = full_text
 
-                        # Çevir
-                        translated, source = self.translation_engine.translate(full_text)
+                        # Çevir (Akıllı Zincir'de SSE ile kısmi çeviri anında HUD'a yazılır)
+                        last_push = [0.0]
+
+                        def on_partial(partial):
+                            now_p = time.time()
+                            if now_p - last_push[0] >= 0.04:
+                                last_push[0] = now_p
+                                self.root.after(0, lambda t=partial: self.set_text(t, "…"))
+
+                        translated, source = self.translation_engine.translate(
+                            full_text, on_partial=on_partial)
 
                         # Geçmişe ekle
                         self.subtitle_history.append((translated, source))

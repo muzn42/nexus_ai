@@ -1,0 +1,53 @@
+{
+    "version": 1,
+    "dictionaries": [
+        {
+            "id": "nexus_golden",
+            "game": "Nexus Golden",
+            "lang_from": "en",
+            "lang_to": "tr",
+            "filename": "nexus_golden.db",
+            "source_url": "",
+            "note": "Yerel dosya • 200,808 satır",
+            "license": "",
+            "version": "",
+            "size_hint": ""
+        },
+        {
+            "id": "oyun_ceviri",
+            "game": "Genel Oyun Sözlüğü",
+            "lang_from": "en",
+            "lang_to": "tr",
+            "filename": "oyun_ceviri.db",
+            "source_url": "",
+            "note": "Yerel dosya • 32 satır",
+            "license": "",
+            "version": "",
+            "size_hint": ""
+        },
+        {
+            "id": "rdr2_ceviri",
+            "game": "Red Dead Redemption 2",
+            "lang_from": "en",
+            "lang_to": "tr",
+            "filename": "rdr2_ceviri.db",
+            "source_url": "",
+            "note": "Yerel dosya • 168,680 satır",
+            "license": "",
+            "version": "",
+            "size_hint": ""
+        },
+        {
+            "id": "rdr2_ceviri1",
+            "game": "Red Dead Redemption 2 (1)",
+            "lang_from": "en",
+            "lang_to": "tr",
+            "filename": "rdr2_ceviri1.db",
+            "source_url": "",
+            "note": "Yerel dosya • 94,590 satır",
+            "license": "",
+            "version": "",
+            "size_hint": ""
+        }
+    ]
+}

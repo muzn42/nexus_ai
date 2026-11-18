@@ -53,6 +53,13 @@ data/translation_cache.db
 temp_subs/
 conversations/*.jsonl
 
+# AI ajan skill/agent kurulumlari (ECC, ui-ux-pro-max) — makineye ozel, ~7.5MB
+# Yeniden kurmak icin:
+#   npx ecc-universal install --target antigravity --profile developer --no-hooks
+#   npx ui-ux-pro-max-cli init --ai antigravity
+.agents/
+.nexus_ai/
+
 # IDE & Editor files
 .idea/
 .vscode/*

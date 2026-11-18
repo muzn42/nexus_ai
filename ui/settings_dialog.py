@@ -225,10 +225,10 @@ class SettingsDialog:
 
         # 1. Çeviri motoru
         ctk.CTkLabel(parent, text="1. Çeviri Sistemi", font=("Segoe UI", 13, "bold"), text_color="#00d2d3").pack(anchor="w", pady=(0, 5))
-        ctk.CTkLabel(parent, text="Öncelikli: Yerel Veritabanı (0 ms, ücretsiz)", text_color="#2ecc71", font=("Segoe UI", 11)).pack(anchor="w", pady=2)
+        ctk.CTkLabel(parent, text="Öncelikli: Yerel Veritabanı (Varsa 0 ms, ücretsiz)", text_color="#2ecc71", font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
-        ctk.CTkLabel(parent, text="Yedek Çevirmen:", font=("Segoe UI", 12)).pack(anchor="w", pady=(8, 2))
-        engines = ["Google Translate (Ücretsiz)", "Argos Translate (Çevrimdışı)", "Gemini AI"]
+        ctk.CTkLabel(parent, text="Yapay Zeka / Çevirmen:", font=("Segoe UI", 12)).pack(anchor="w", pady=(8, 2))
+        engines = ["Akıllı Zincir (GPT-OSS → Gemini)", "Groq AI (Qwen 27B)", "Gemini AI", "Google Translate (Ücretsiz)", "Argos Translate (Çevrimdışı)"]
         combo_eng = ctk.CTkComboBox(parent, values=engines)
         combo_eng.set(s.get("fallback_engine", engines[0]))
         combo_eng.pack(fill="x", pady=5)
@@ -245,33 +245,101 @@ class SettingsDialog:
                              setattr(self.app.translation_engine, 'auto_learn_enabled', var_al.get())]
         ).pack(anchor="w", pady=5)
 
+        # Groq API
+        ctk.CTkLabel(parent, text="Groq API Anahtarı (Önerilen Hızlı Model):", font=("Segoe UI", 11)).pack(anchor="w", pady=(8, 2))
+        entry_groq = ctk.CTkEntry(parent, placeholder_text="gsk_... API Anahtarınızı Yapıştırın...", show="*")
+        entry_groq.insert(0, s.get("groq_api_key", ""))
+        entry_groq.pack(fill="x", pady=4)
+
+        def save_groq_key():
+            k = entry_groq.get().strip()
+            self._set_and_save("groq_api_key", k)
+            self.app.translation_engine.groq_api_key = k
+            self.app.translation_engine._groq_client = None
+            messagebox.showinfo("Kaydedildi", "Groq API Anahtarı güncellendi.")
+        ctk.CTkButton(parent, text="Groq Anahtarını Kaydet", command=save_groq_key, fg_color="#27ae60", hover_color="#2ecc71", width=140).pack(anchor="e", pady=2)
+
         # Gemini API
-        ctk.CTkLabel(parent, text="Gemini API Anahtarı (opsiyonel):", font=("Segoe UI", 11)).pack(anchor="w", pady=(10, 2))
-        entry_key = ctk.CTkEntry(parent, placeholder_text="API Anahtarınızı Yapıştırın...", show="*")
+        ctk.CTkLabel(parent, text="Gemini API Anahtarı:", font=("Segoe UI", 11)).pack(anchor="w", pady=(8, 2))
+        entry_key = ctk.CTkEntry(parent, placeholder_text="AIzaSy... API Anahtarınızı Yapıştırın...", show="*")
         entry_key.insert(0, s.get("gemini_api_key", ""))
-        entry_key.pack(fill="x", pady=5)
+        entry_key.pack(fill="x", pady=4)
 
         def save_key():
-            self._set_and_save("gemini_api_key", entry_key.get().strip())
-            self.app.translation_engine.gemini_api_key = entry_key.get().strip()
+            k = entry_key.get().strip()
+            self._set_and_save("gemini_api_key", k)
+            self.app.translation_engine.gemini_api_key = k
             self.app.translation_engine._gemini_model = None
-            messagebox.showinfo("Kaydedildi", "API Anahtarı güncellendi.")
-        ctk.CTkButton(parent, text="Kaydet", command=save_key, fg_color="#444444", width=100).pack(anchor="e", pady=3)
+            self.app.translation_engine.set_keys(gemini_api_key=k)
+            messagebox.showinfo("Kaydedildi", "Gemini API Anahtarı güncellendi.")
+        ctk.CTkButton(parent, text="Gemini Anahtarını Kaydet", command=save_key, fg_color="#444444", width=140).pack(anchor="e", pady=2)
+
+        # EVREN AI API
+        ctk.CTkLabel(parent, text="EVREN AI API Anahtarı (SSYZ - Milli Yapay Zeka):", font=("Segoe UI", 11)).pack(anchor="w", pady=(8, 2))
+        entry_evren = ctk.CTkEntry(parent, placeholder_text="evren_llm_... API Anahtarınızı Yapıştırın...", show="*")
+        entry_evren.insert(0, s.get("evren_api_key", ""))
+        entry_evren.pack(fill="x", pady=4)
+
+        def save_evren_key():
+            k = entry_evren.get().strip()
+            self._set_and_save("evren_api_key", k)
+            self.app.translation_engine.evren_api_key = k
+            self.app.translation_engine.set_keys(evren_api_key=k)
+            messagebox.showinfo("Kaydedildi", "EVREN AI API Anahtarı güncellendi.")
+        ctk.CTkButton(parent, text="EVREN Anahtarını Kaydet", command=save_evren_key, fg_color="#1e3799", hover_color="#4a69bd", width=160).pack(anchor="e", pady=2)
 
         ctk.CTkFrame(parent, height=2, fg_color="gray").pack(fill="x", pady=12)
 
         # 2. OCR
         ctk.CTkLabel(parent, text="2. OCR Ayarları", font=("Segoe UI", 13, "bold"), text_color="#00d2d3").pack(anchor="w", pady=(0, 5))
 
-        combo_ver = ctk.CTkComboBox(parent, values=["PP-OCRv5 (Daha Doğru)", "PP-OCRv4 (Daha Hızlı)"])
-        combo_ver.set("PP-OCRv5 (Daha Doğru)" if s.get("paddle_version") == "PP-OCRv5" else "PP-OCRv4 (Daha Hızlı)")
+        ver_labels = {
+            "PP-OCRv6": "PP-OCRv6 (Hızlı - Önerilen)",
+            "PP-OCRv5": "PP-OCRv5 (Daha Doğru)",
+            "PP-OCRv4": "PP-OCRv4 (Daha Hızlı)",
+        }
+        combo_ver = ctk.CTkComboBox(parent, values=list(ver_labels.values()))
+        combo_ver.set(ver_labels.get(s.get("paddle_version"), ver_labels["PP-OCRv5"]))
         combo_ver.pack(fill="x", pady=5)
 
         def on_ver(choice):
-            ver = "PP-OCRv5" if "v5" in choice else "PP-OCRv4"
+            ver = "PP-OCRv6" if "v6" in choice else ("PP-OCRv5" if "v5" in choice else "PP-OCRv4")
             self._set_and_save("paddle_version", ver)
             self.app.ocr_engine.reset(version=ver)
         combo_ver.configure(command=on_ver)
+
+        # PP-OCRv6 model boyutu (tiny / small / medium)
+        size_labels = {
+            "tiny": "PP-OCRv6 Tiny (En Hızlı - Temiz Altyazı)",
+            "small": "PP-OCRv6 Small (Dengeli - Önerilen)",
+            "medium": "PP-OCRv6 Medium (En Doğru - Yavaş)",
+        }
+        ctk.CTkLabel(parent, text="Model Boyutu (PP-OCRv6):", font=("Segoe UI", 11)).pack(anchor="w", pady=(6, 2))
+        combo_size = ctk.CTkComboBox(parent, values=list(size_labels.values()))
+        combo_size.set(size_labels.get(s.get("ocr_model_size", "small"), size_labels["small"]))
+        combo_size.pack(fill="x", pady=5)
+
+        def on_size(choice):
+            size = "tiny" if "Tiny" in choice else ("small" if "Small" in choice else "medium")
+            self._set_and_save("ocr_model_size", size)
+            self.app.ocr_engine.reset(model_size=size)
+        combo_size.configure(command=on_size)
+
+        # İşlem birimi: CPU / GPU
+        dev_labels = {
+            "cpu": "CPU (MKLDNN hızlandırmalı)",
+            "gpu": "GPU (NVIDIA CUDA - paddlepaddle-gpu gerekir)",
+        }
+        ctk.CTkLabel(parent, text="İşlem Birimi:", font=("Segoe UI", 11)).pack(anchor="w", pady=(6, 2))
+        combo_dev = ctk.CTkComboBox(parent, values=list(dev_labels.values()))
+        combo_dev.set(dev_labels.get(s.get("ocr_device", "cpu"), dev_labels["cpu"]))
+        combo_dev.pack(fill="x", pady=5)
+
+        def on_dev(choice):
+            dev = "gpu" if "GPU" in choice else "cpu"
+            self._set_and_save("ocr_device", dev)
+            self.app.ocr_engine.reset(device=dev)
+        combo_dev.configure(command=on_dev)
 
         var_mk = tk.BooleanVar(value=s.get("use_mkldnn", True))
         ctk.CTkCheckBox(parent, text="CPU Hızlandırma (MKLDNN)", variable=var_mk,
@@ -279,26 +347,48 @@ class SettingsDialog:
                              self.app.ocr_engine.reset(use_mkldnn=var_mk.get())]
         ).pack(anchor="w", pady=5)
 
+        ctk.CTkLabel(
+            parent,
+            text=("Not: Paddle 3.3.x'te MKLDNN/PIR hatası var. Kalıcı çözüm:\n"
+                  "pip install paddlepaddle==3.2.2"),
+            font=("Segoe UI", 10), text_color="#e67e22", justify="left"
+        ).pack(anchor="w", pady=(0, 2))
+
         ctk.CTkFrame(parent, height=2, fg_color="gray").pack(fill="x", pady=12)
 
-        # 3. Veritabanı seçimi
-        ctk.CTkLabel(parent, text="3. Oyun Veritabanı", font=("Segoe UI", 13, "bold"), text_color="#00d2d3").pack(anchor="w", pady=(0, 5))
+        # 3. Oyun & Veritabanı seçimi
+        ctk.CTkLabel(parent, text="3. Oyun & Veritabanı Seçimi", font=("Segoe UI", 13, "bold"), text_color="#00d2d3").pack(anchor="w", pady=(0, 5))
 
-        db_files = [f for f in os.listdir(DATA_DIR) if f.endswith(".db") and f != "translation_cache.db"] if os.path.exists(DATA_DIR) else []
-        if db_files:
-            combo_db = ctk.CTkComboBox(parent, values=db_files)
-            current_db = os.path.basename(s.get("db_path", ""))
-            combo_db.set(current_db if current_db in db_files else db_files[0])
-            combo_db.pack(fill="x", pady=5)
+        game_map = {
+            "Red Dead Redemption 2 (Yerel DB)": os.path.join(DATA_DIR, "rdr2_ceviri.db"),
+            "Diğer Oyunlar (DB Yok - Doğrudan Yapay Zeka)": "",
+        }
+        if os.path.exists(DATA_DIR):
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".db") and f not in ("translation_cache.db", "nexus_golden.db", "rdr2_ceviri.db"):
+                    game_map[f"Özel DB: {f}"] = os.path.join(DATA_DIR, f)
 
-            def on_db(choice):
-                new_path = os.path.join(DATA_DIR, choice)
-                self._set_and_save("db_path", new_path)
-                self.app.db_manager.reload(new_path)
-                messagebox.showinfo("Veritabanı", f"'{choice}' yükleniyor...")
-            combo_db.configure(command=on_db)
-        else:
-            ctk.CTkLabel(parent, text="data/ klasöründe DB dosyası bulunamadı.", text_color="gray").pack(anchor="w")
+        current_db = s.get("db_path", "")
+        selected_label = "Diğer Oyunlar (DB Yok - Doğrudan Yapay Zeka)"
+        if current_db:
+            for label, path in game_map.items():
+                if path and os.path.basename(path) == os.path.basename(current_db):
+                    selected_label = label
+                    break
+
+        combo_db = ctk.CTkComboBox(parent, values=list(game_map.keys()))
+        combo_db.set(selected_label)
+        combo_db.pack(fill="x", pady=5)
+
+        def on_db(choice):
+            new_path = game_map.get(choice, "")
+            self._set_and_save("db_path", new_path)
+            self.app.db_manager.reload(new_path)
+            if new_path:
+                messagebox.showinfo("Oyun Seçimi", f"'{choice}' yüklendi.")
+            else:
+                messagebox.showinfo("Oyun Seçimi", "Diğer Oyun modu: Yerel RDR2 veritabanı kapatıldı, doğrudan hızlı yapay zeka kullanılacak.")
+        combo_db.configure(command=on_db)
 
     # === HAKKINDA ===
     def _page_about(self, parent):

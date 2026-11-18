@@ -1,14 +1,17 @@
 """
 NEXUS AI v2 — Giriş Noktası
-Uygulamayı başlatır. Geri dönmek için main_v1.py'yi çalıştırabilirsiniz.
+
+Uygulamayı başlatır. Arayüz PySide6 (Qt) tabanlıdır.
+Eski Tkinter sürümü için: ui/hud.py (yedek olarak duruyor).
 """
-from ui.hud import TranslationApp
+import sys
 
 
 def main():
-    app = TranslationApp()
-    app.start()
+    from ui.qt.app import main as qt_main
+    return qt_main()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
+

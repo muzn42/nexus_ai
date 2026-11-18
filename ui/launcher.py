@@ -8,7 +8,9 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 
-from core.config_manager import ConfigManager, LOGO_PATH, APP_NAME, APP_VERSION
+from core.config_manager import (
+    ConfigManager, SettingsManager, LOGO_PATH, APP_NAME, APP_VERSION, DATA_DIR
+)
 import cv2
 
 
@@ -24,13 +26,26 @@ def select_roi_fullscreen(image_np):
 
 
 def list_available_cameras(max_check=3):
+    """
+    Kamera / capture card portlarını listeler.
+
+    Not: CAP_DSHOW ile port yoklamak Windows'ta her başarısız denemede
+    8-20 sn bekleyebiliyor (eski kod açılışı ~42 sn geciktiriyordu).
+    Bu yüzden: varsayılan backend kullanılır, ilk boş portta arama kesilir
+    ve her port için kısa bir açma denemesi yapılır.
+    """
     available_ports = ["PC Ekranı"]
     for i in range(max_check):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if cap.isOpened():
+        cap = cv2.VideoCapture(i)
+        try:
+            if not cap.isOpened():
+                break  # İlk boş indekste dur — gereksiz 30+ sn beklemeyi önler
             ret, _ = cap.read()
             if ret:
                 available_ports.append(f"Kamera / Capture Card (Port {i})")
+        except Exception:
+            break
+        finally:
             cap.release()
     return available_ports
 
@@ -41,6 +56,7 @@ class StartupScreen:
     def __init__(self, app_instance):
         self.app = app_instance
         self.root = ctk.CTkToplevel()
+        self.root.deiconify()
         self.root.title(f"{APP_NAME} v{APP_VERSION} Launcher")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -50,19 +66,23 @@ class StartupScreen:
         except Exception:
             pass
 
-        w, h = 520, 720
+        w, h = 540, 780
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
         self.root.geometry('%dx%d+%d+%d' % (w, h, (ws / 2) - (w / 2), (hs / 2) - (h / 2)))
         self.root.resizable(False, False)
+        self.root.lift()
+        self.root.focus_force()
+        self.root.attributes("-topmost", True)
+        self.root.after(800, lambda: self.root.attributes("-topmost", False))
 
         # ===== HEADER =====
         header_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        header_frame.pack(pady=(25, 5))
+        header_frame.pack(pady=(20, 5))
 
         ctk.CTkLabel(
             header_frame, text=APP_NAME,
-            font=("Segoe UI", 42, "bold"), text_color="#00d2d3"
+            font=("Segoe UI", 40, "bold"), text_color="#00d2d3"
         ).pack()
         ctk.CTkLabel(
             header_frame, text=f"HIZLI OYUN ÇEVİRİ ASİSTANI  •  v{APP_VERSION}",
@@ -71,7 +91,7 @@ class StartupScreen:
 
         # ===== MOTOR DURUMU =====
         status_frame = ctk.CTkFrame(self.root, fg_color="#1a1a2e", corner_radius=10)
-        status_frame.pack(pady=(10, 5), padx=30, fill="x")
+        status_frame.pack(pady=(8, 4), padx=30, fill="x")
 
         ctk.CTkLabel(
             status_frame, text="Motor Durumu",
@@ -82,16 +102,17 @@ class StartupScreen:
         motors_frame = ctk.CTkFrame(status_frame, fg_color="transparent")
         motors_frame.pack(fill="x", padx=15, pady=(0, 8))
 
+        self._add_motor_status(motors_frame, "Groq AI (Qwen 27B)", bool(self.app.settings.get("groq_api_key", "")))
+        self._add_motor_status(motors_frame, "Gemini AI", bool(self.app.settings.get("gemini_api_key", "")))
         self._add_motor_status(motors_frame, "Google Translate", self._check_deep_translator())
         self._add_motor_status(motors_frame, "Argos Translate", self._check_argos())
-        self._add_motor_status(motors_frame, "Gemini AI", bool(self.app.settings.get("gemini_api_key", "")))
 
         # ===== DB PROGRESS =====
         db_frame = ctk.CTkFrame(self.root, fg_color="#1a1a2e", corner_radius=10)
-        db_frame.pack(pady=5, padx=30, fill="x")
+        db_frame.pack(pady=4, padx=30, fill="x")
 
         self.db_status_label = ctk.CTkLabel(
-            db_frame, text="📂 Veritabanı yükleniyor...",
+            db_frame, text="📂 Veritabanı durumu kontrol ediliyor...",
             font=("Segoe UI", 11), text_color="#aaaaaa"
         )
         self.db_status_label.pack(anchor="w", padx=15, pady=(8, 2))
@@ -105,24 +126,59 @@ class StartupScreen:
 
         # ===== ANA İÇERİK =====
         main_frame = ctk.CTkFrame(self.root, corner_radius=12)
-        main_frame.pack(pady=10, padx=30, fill="both", expand=True)
+        main_frame.pack(pady=8, padx=30, fill="both", expand=True)
 
-        # Kaynak seçimi
+        # 1. Kaynak seçimi
         ctk.CTkLabel(
             main_frame, text="1. Görüntü Kaynağı",
             font=("Segoe UI", 13, "bold")
-        ).pack(pady=(15, 5), padx=20, anchor="w")
+        ).pack(pady=(10, 4), padx=20, anchor="w")
 
-        self.combo_source = ctk.CTkComboBox(main_frame, values=["Yükleniyor..."], width=300)
+        self.combo_source = ctk.CTkComboBox(main_frame, values=["Yükleniyor..."], width=320)
         self.combo_source.set("PC Ekranı")
-        self.combo_source.pack(pady=5, padx=20)
+        self.combo_source.pack(pady=3, padx=20)
         threading.Thread(target=self._load_sources, daemon=True).start()
 
-        # Profil seçimi
+        # 2. Oyun seçimi
         ctk.CTkLabel(
-            main_frame, text="2. Çeviri Alanı (Profil)",
+            main_frame, text="2. Oyun & Veritabanı",
             font=("Segoe UI", 13, "bold")
-        ).pack(pady=(15, 5), padx=20, anchor="w")
+        ).pack(pady=(10, 4), padx=20, anchor="w")
+
+        self.game_map = {
+            "Red Dead Redemption 2 (Yerel DB)": os.path.join(DATA_DIR, "rdr2_ceviri.db"),
+            "Diğer Oyunlar (DB Yok - Doğrudan Yapay Zeka)": "",
+        }
+        if os.path.exists(DATA_DIR):
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".db") and f not in ("translation_cache.db", "nexus_golden.db", "rdr2_ceviri.db"):
+                    self.game_map[f"Özel DB: {f}"] = os.path.join(DATA_DIR, f)
+
+        current_db = self.app.settings.get("db_path", "")
+        selected_game = "Diğer Oyunlar (DB Yok - Doğrudan Yapay Zeka)"
+        if current_db:
+            for label, path in self.game_map.items():
+                if path and os.path.basename(path) == os.path.basename(current_db):
+                    selected_game = label
+                    break
+
+        self.combo_game = ctk.CTkComboBox(main_frame, values=list(self.game_map.keys()), width=320)
+        self.combo_game.set(selected_game)
+        self.combo_game.pack(pady=3, padx=20)
+
+        def on_game_change(choice):
+            new_path = self.game_map.get(choice, "")
+            self.app.settings["db_path"] = new_path
+            SettingsManager.save(self.app.settings)
+            self.app.db_manager.reload(new_path)
+            self._poll_db_progress()
+        self.combo_game.configure(command=on_game_change)
+
+        # 3. Profil seçimi
+        ctk.CTkLabel(
+            main_frame, text="3. Çeviri Alanı (Profil)",
+            font=("Segoe UI", 13, "bold")
+        ).pack(pady=(10, 4), padx=20, anchor="w")
 
         profile_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         profile_frame.pack(fill="x", padx=20)
@@ -130,7 +186,7 @@ class StartupScreen:
         self.profiles = ConfigManager.load_profiles()
         self.profile_names = ["Yeni Alan Seç (+Kaydet)"] + list(self.profiles.keys())
 
-        self.combo_profile = ctk.CTkComboBox(profile_frame, values=self.profile_names, width=250)
+        self.combo_profile = ctk.CTkComboBox(profile_frame, values=self.profile_names, width=270)
         self.combo_profile.set(self.profile_names[0])
         self.combo_profile.pack(side="left", fill="x", expand=True)
 
@@ -139,25 +195,25 @@ class StartupScreen:
             fg_color="#e74c3c", hover_color="#c0392b",
             command=self._delete_profile
         )
-        self.btn_del.pack(side="right", padx=(10, 0))
+        self.btn_del.pack(side="right", padx=(8, 0))
 
         # ===== BUTONLAR =====
         btn_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        btn_frame.pack(pady=(15, 20))
+        btn_frame.pack(pady=(10, 15))
 
         self.btn_start = ctk.CTkButton(
             btn_frame, text="▶  BAŞLAT", command=self.on_start,
             font=("Segoe UI", 16, "bold"), fg_color='#6c5ce7', hover_color='#5f27cd',
-            width=220, height=50, corner_radius=25
+            width=220, height=48, corner_radius=24
         )
-        self.btn_start.pack(pady=8)
+        self.btn_start.pack(pady=6)
 
         self.btn_settings = ctk.CTkButton(
             btn_frame, text="⚙  AYARLAR", command=self.on_settings,
             font=("Segoe UI", 12, "bold"), fg_color='#333333', hover_color='#2d3436',
             width=160, height=35, corner_radius=15
         )
-        self.btn_settings.pack(pady=3)
+        self.btn_settings.pack(pady=2)
 
     def _add_motor_status(self, parent, name, available):
         f = ctk.CTkFrame(parent, fg_color="transparent")
@@ -183,6 +239,14 @@ class StartupScreen:
     def _poll_db_progress(self):
         """DB yükleme ilerlemesini düzenli kontrol et."""
         db = self.app.db_manager
+        if not db.db_path:
+            self.db_progress.set(1.0)
+            self.db_status_label.configure(
+                text="⚡ Doğrudan Yapay Zeka Modu (Yerel DB Yok)",
+                text_color="#00d2d3"
+            )
+            return
+
         if db.is_loaded:
             self.db_progress.set(1.0)
             self.db_status_label.configure(
@@ -225,6 +289,14 @@ class StartupScreen:
             except Exception:
                 cam_idx = 0
         self.app.set_source(source_type, cam_idx)
+
+        # Oyun ve Veritabanı seçimi kaydet
+        game_choice = self.combo_game.get()
+        selected_db = self.game_map.get(game_choice, "")
+        self.app.settings["db_path"] = selected_db
+        SettingsManager.save(self.app.settings)
+        if self.app.db_manager.db_path != selected_db:
+            self.app.db_manager.reload(selected_db)
 
         selection_prof = self.combo_profile.get()
         saved_roi = None

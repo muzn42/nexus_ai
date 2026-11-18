@@ -26,11 +26,21 @@ class DBManager:
         self.load_thread.start()
 
     def _load_data(self):
+        # Eğer DB seçilmediyse veya boşsa doğrudan AI modunda çalış
+        if not self.db_path or self.db_path.lower() in ("none", "yok", "db_yok", ""):
+            self.golden_cache = {}
+            self.data_cache = {}
+            self.entry_count = 0
+            self.is_loaded = True
+            print("[DB] Oyun veritabanı devre dışı (Doğrudan Yapay Zeka modu aktif).")
+            return
+
         data_dir = os.path.dirname(self.db_path) if self.db_path else ""
         golden_path = os.path.join(data_dir, "nexus_golden.db")
 
-        # 1. Altın DB varsa yükle (Yapay zeka ile süzülmüş en kaliteli çeviriler)
-        if os.path.exists(golden_path):
+        # 1. Altın DB varsa yükle (Yalnızca RDR2 için geçerli)
+        is_rdr2 = "rdr2" in os.path.basename(self.db_path).lower()
+        if is_rdr2 and os.path.exists(golden_path):
             try:
                 conn_g = sqlite3.connect(golden_path)
                 cursor_g = conn_g.cursor()
@@ -134,11 +144,12 @@ class DBManager:
 
     def reload(self, new_db_path: str = None, on_progress=None):
         """Yeni bir veritabanı dosyası ile yeniden yükle."""
-        if new_db_path:
+        if new_db_path is not None:
             self.db_path = new_db_path
         if on_progress:
             self.on_progress = on_progress
         self.data_cache = {}
+        self.golden_cache = {}
         self.is_loaded = False
         self.entry_count = 0
         self.load_thread = threading.Thread(target=self._load_data, daemon=True)

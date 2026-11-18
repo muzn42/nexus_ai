@@ -1,8 +1,11 @@
 # NEXUS AI v2 — Bağımlılıklar (Dependencies)
 
-# Modern Arayüz ve Görsel Öğeler
-customtkinter>=5.2.0
+# Arayüz (Qt) — yeni ana arayüz
+PySide6>=6.8.0
 pillow>=10.0.0
+
+# Eski Tkinter arayüzü (main_v1.py) için; yeni arayüzde gerekmez
+# customtkinter>=5.2.0
 
 # Görüntü İşleme ve Ekran Yakalama
 opencv-python>=4.8.0
@@ -13,10 +16,13 @@ keyboard>=0.13.5
 
 # OCR Motoru (PaddleOCR)
 # Not: GPU hızlandırması için paddlepaddle-gpu kurabilirsiniz.
-paddlepaddle>=2.5.0
-paddleocr>=2.7.0
+# ONEMLI: paddlepaddle 3.3.x surumlerinde oneDNN/MKLDNN + PIR hatasi var
+# (ConvertPirAttribute2RuntimeAttribute). 3.2.2 surumu onerilir.
+paddlepaddle==3.2.2
+paddleocr>=3.7.0
 
 # Çeviri Motorları
+openai>=1.0.0
 google-generativeai>=0.3.0
 deep-translator>=1.11.0
 argostranslate>=1.9.0
