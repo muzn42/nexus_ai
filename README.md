@@ -136,13 +136,14 @@ Gerçek RDR2 / GTA 6 yayın karelerinde tespit edilip doğrudan giderilen hatala
 | Dosya | Sorumluluk |
 | :--- | :--- |
 | `core/config_manager.py` | `DEFAULT_SETTINGS`, `SettingsManager`, `ConfigManager`, `.env` yükleme. |
-| `core/capture.py` | `ScreenSource`, `WindowSource` (DPI uyumlu arka/ön pencere yakalama), `CameraSource` (Capture Card). |
-| `core/windows.py` | Win32 pencere listeleme ve `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` koruması. |
+| `core/capture.py` | `ScreenSource`, `WindowSource` (DPI uyumlu pencere yakalama; üstüne gelen başka pencereleri `_mask_occluders` ile siyaha boyar, %85'ten fazlası kapalıysa kareyi atlar), `CameraSource` (Capture Card). |
+| `core/windows.py` | Win32 pencere listeleme, `occluding_rects()` (z-sırasında üstteki pencereler, DWM gerçek çerçevesi) ve `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` koruması. |
+| `core/button_icons.py` | OCR kelime kutularından tuş ikonlarını (`R2`, `X`…) bulur, orijinal piksellerini saklar; yama katmanı `[R2]` etiketini bu ikonla satır içi çizer. |
 | `core/ocr_engine.py` | `OCREngine` (PP-OCRv4/v5/v6, tiny/small/medium, GPU CUDA + CPU MKLDNN fallback, `_INIT_LOCK` + `_predict_lock`, `text_det_limit_type="max"`) ve `merge_nearby_boxes()`. |
 | `core/text_filter.py` | `clean_ocr_game_text`, `is_translatable_game_text`, `split_speaker_prefix`, `is_in_auto_subtitle_zone`, `auto_subtitle_roi`, `has_subtitle_text_changed`, `sample_box_style`, `trim_button_icons_from_boxes`. |
 | `core/box_tracker.py` | `TrackedBox` & `BoxTracker`: IoU + metin benzerliği takibi, koordinat yumuşatma, `stabilization_frames` onayı, piksel tabanlı kaybolma kontrolü (`check_disappearances`). |
 | `core/pipeline.py` | `TranslationPipeline`: `nexus-sub-pipeline` ve `nexus-world-pipeline` paralel iş parçacıkları, `F7` `process_full_frame(..., is_freeze=True)` tam kare taraması. |
-| `core/db_manager.py` | `DBManager` (O(1) normalize hash + 3 kelimelik kova indeksi, atomik yükleme) ve `AutoLearnDB` (`find`, `save`, `clear`, `count`). |
+| `core/db_manager.py` | `DBManager` (O(1) normalize hash + 3 kelimelik kova indeksi, atomik yükleme) ve `AutoLearnDB` (`find`, `save`, `clear`, `count`, `set_db`; öğrenilenler seçili oyun DB'sinin `learned_translations` tablosuna yazılır, `is_learnable` çöpü eler). |
 | `core/db_catalog.py` | Sözlük kütüphanesi keşfi ve kurulumu (`gta6_ceviri.db`, `rdr2_ceviri.db`, `nexus_golden.db`). |
 | `core/llm_chain.py` | `LLMChain`: Groq (`openai/gpt-oss-120b`), EVREN, Gemini zinciri; SSE streaming, oyun yerelleştirme prompt'ları (`SYSTEM_PROMPT`, `BATCH_SYSTEM_PROMPT`), özel isim koruma, 429/503 cooldown yönetimi. |
 | `core/translation_engine.py` | `TranslationEngine`: thread-safe LRU bellek cache → Altın/Oyun DB → (açıksa) AutoLearn → LLM/Google/Argos zinciri + `translate_batch()`. |
@@ -164,6 +165,11 @@ Gerçek RDR2 / GTA 6 yayın karelerinde tespit edilip doğrudan giderilen hatala
 - `config/settings.json`: Kalıcı kullanıcı ayarları (**Not:** API anahtarları repoya boş string olarak commit edilir; kendi anahtarlarınızı Ayarlar arayüzünden veya `.env` üzerinden girin).
 - `config/profiles.json` & `config/dictionaries.json`: Kaydedilmiş ROI profilleri ve sözlük kataloğu.
 - `data/`: Oyun sözlük veritabanları (`rdr2_ceviri.db`, `gta6_ceviri.db`, `nexus_golden.db`) ve çalışma zamanı önbelleği (`translation_cache.db`, `.gitignore` ile hariç tutulur).
+- `data/gta6/`: GTA 6 karakter defteri (`characters.json`), terim sözlüğü (`glossary.json`), video'dan üretilen satırların tabloları (`tablo_*.md`) ve inceleme listeleri (`inceleme_*.md`).
+- `tools/video_to_db/`: YouTube oynanış videosundan GTA 6 sözlüğü üreten araç (Gemini Göz + PaddleOCR + iki çevirmen + hakem). Ayrıntı: [tools/video_to_db/README.md](tools/video_to_db/README.md).
+- `packaging/`: PyInstaller tek klasör paket (`build.ps1`, `nexus.spec`) ve son kullanıcı kurulum rehberi (`KURULUM.md`).
+- `tests/`: tuş etiketi, satır içi ikon ve gerçek kare testleri (betik olarak veya `pytest` ile).
+- Ajan talimatları: [AGENTS.md](AGENTS.md) (tek doğru kaynak), `CLAUDE.md` / `GEMINI.md` (AGENTS.md'ye yönlendirir), Antigravity için `.agents/rules/00-nexus-proje.md` ve `.agents/workflows/`.
 
 ---
 

@@ -82,6 +82,9 @@ class TrackedBox:
     last_seen: float = field(default_factory=time.time)
     is_proper_noun: bool = False
     translation_requested: bool = False
+    # Satır içi tuş ikonları: [{"token": "R2", "bbox": (x, y, w, h), "rgb": ndarray}]
+    # (core/button_icons.attach_button_icons üretir, patch_overlay çizer)
+    icons: list = field(default_factory=list)
     _thumb: object = field(default=None, repr=False)
 
     def check_still_present(self, frame_bgr, diff_threshold: float = 0.22) -> bool:
@@ -205,6 +208,9 @@ class BoxTracker:
                 box.is_subtitle = d_sub
                 box.line_count = d_lines
                 box.bbox = d_bbox
+                # İkonları yalnızca aday yeni ikon taşıyorsa tazele (OCR'ın kaçırdığı karede kaybolmasın)
+                if det.get("icons"):
+                    box.icons = list(det["icons"])
 
                 # Yumuşatılmış koordinat (flicker önleme)
                 ox, oy, ow, oh = box.smoothed_bbox
@@ -245,6 +251,7 @@ class BoxTracker:
                 missed_frames=0,
                 last_seen=now,
                 _thumb=_grab_thumb(frame_bgr, d_bbox),
+                icons=list(det.get("icons") or []),
             )
             matched_ids.add(bid)
 

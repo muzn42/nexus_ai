@@ -190,6 +190,77 @@ def window_client_rect(hwnd: int):
         return None
 
 
+GA_ROOT = 2
+GW_HWNDPREV = 3
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+
+def _visible_frame_rect(user32, hwnd):
+    """Pencerenin görünen çerçevesi (Win10/11'deki görünmez gölge kenarı hariç)."""
+    r = wt.RECT()
+    try:
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wt.HWND(hwnd), DWMWA_EXTENDED_FRAME_BOUNDS,
+                ctypes.byref(r), ctypes.sizeof(r)) == 0:
+            return r.left, r.top, r.right, r.bottom
+    except Exception:
+        pass
+    if user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(r)):
+        return r.left, r.top, r.right, r.bottom
+    return None
+
+
+def occluding_rects(hwnd: int, region) -> list:
+    """
+    Hedef pencerenin ÜSTÜNDE duran ve `region` (x, y, w, h — ekran koordinatı) ile
+    kesişen başka uygulama pencerelerinin kesişim dikdörtgenleri: [(x, y, w, h), ...].
+
+    WindowSource ekran bölgesini yakaladığı için üste gelen pencerenin (Dosya Gezgini,
+    tarayıcı...) yazıları da OCR'a giriyordu; bu dikdörtgenler karede maskelenir.
+    Atlananlar: kendi sürecimiz (overlay/HUD zaten yakalamadan gizli), hedefin kendi
+    süreci (açılır menüleri oyuna ait), görünmez / küçültülmüş / cloaked ve tıklama
+    geçirgen (WS_EX_TRANSPARENT: NVIDIA/Discord gibi şeffaf overlay) pencereler.
+    """
+    if not IS_WIN or not hwnd or not region:
+        return []
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetWindow.restype = wt.HWND
+        user32.GetAncestor.restype = wt.HWND
+        root = user32.GetAncestor(wt.HWND(hwnd), GA_ROOT) or wt.HWND(hwnd)
+        own_pid = os.getpid()
+        tpid = wt.DWORD()
+        user32.GetWindowThreadProcessId(root, ctypes.byref(tpid))
+        rx, ry, rw, rh = [int(v) for v in region]
+        rx2, ry2 = rx + rw, ry + rh
+        out = []
+        h = user32.GetWindow(root, GW_HWNDPREV)
+        guard = 0
+        while h and guard < 512:
+            guard += 1
+            try:
+                if (user32.IsWindowVisible(h) and not user32.IsIconic(h)
+                        and not _is_cloaked(h)
+                        and not (user32.GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TRANSPARENT)):
+                    pid = wt.DWORD()
+                    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                    if pid.value not in (own_pid, tpid.value):
+                        fr = _visible_frame_rect(user32, h)
+                        if fr:
+                            x1, y1 = max(rx, fr[0]), max(ry, fr[1])
+                            x2, y2 = min(rx2, fr[2]), min(ry2, fr[3])
+                            if x2 > x1 and y2 > y1:
+                                out.append((x1, y1, x2 - x1, y2 - y1))
+            except Exception:
+                pass
+            h = user32.GetWindow(h, GW_HWNDPREV)
+        return out
+    except Exception:
+        return []
+
+
 def is_minimized(hwnd: int) -> bool:
     if not IS_WIN or not hwnd:
         return True

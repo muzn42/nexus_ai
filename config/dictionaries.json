@@ -51,12 +51,12 @@
         },
         {
             "id": "gta6_ceviri",
-            "game": "Gta6 Ceviri",
+            "game": "GTA 6",
             "lang_from": "en",
             "lang_to": "tr",
             "filename": "gta6_ceviri.db",
             "source_url": "",
-            "note": "Yerel dosya • 31 satır",
+            "note": "Yerel dosya • 3,503 satır • Part 1 videodan (Gemini + OCR)",
             "license": "",
             "version": "",
             "size_hint": ""

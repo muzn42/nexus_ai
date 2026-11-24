@@ -13,6 +13,7 @@ Oyunun tamamının üstünde duran, fare tıklamalarını %100 oyuna geçiren
   - Orijinal yazı rengini, hizasını ve konuşmacı vurgusunu ('Lucia: ...') korur.
 """
 import ctypes
+import re
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
@@ -28,6 +29,57 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QWidget
 
 from core.windows import exclude_widget_from_capture
+
+try:
+    from core.button_icons import GLYPH_TOKEN, button_token
+except Exception:  # pragma: no cover - modül yoksa yalnızca hap (pill) çizilir
+    GLYPH_TOKEN = "BTN"
+    button_token = None
+
+# Çeviri içindeki tuş etiketleri: "[R2]", "[BTN]", "[BTN2]"
+_TAG_RE = re.compile(r"\[([A-Za-z0-9_\-]{1,10})\]")
+
+
+def _is_button_tag(tok: str, icon_map: dict) -> bool:
+    """Etiket gerçekten bir tuş mu? (ikonu var / bilinen tuş adı / sentetik BTN)"""
+    up = tok.upper()
+    if up in icon_map or up.startswith(GLYPH_TOKEN):
+        return True
+    if button_token is not None:
+        try:
+            return button_token(up) is not None
+        except Exception:
+            return False
+    return False
+
+
+def _split_atoms(text: str, icon_map: dict) -> list:
+    """Metni [("text", str) | ("icon", TOKEN)] parçalarına ayırır."""
+    parts, pos = [], 0
+    for m in _TAG_RE.finditer(text):
+        if not _is_button_tag(m.group(1), icon_map):
+            continue
+        if m.start() > pos:
+            parts.append(("text", text[pos:m.start()]))
+        parts.append(("icon", m.group(1).upper()))
+        pos = m.end()
+    if pos < len(text):
+        parts.append(("text", text[pos:]))
+    return parts
+
+
+def _build_icon_map(box) -> dict:
+    """TOKEN → [ikon, ...] (okuma sırasıyla); büyük/küçük harf duyarsız."""
+    out = {}
+    for ic in (getattr(box, "icons", None) or []):
+        try:
+            rgb = ic.get("rgb")
+            if rgb is None or getattr(rgb, "ndim", 0) != 3 or rgb.shape[2] != 3 or rgb.size == 0:
+                continue
+            out.setdefault(str(ic.get("token", "")).upper(), []).append(ic)
+        except Exception:
+            continue
+    return out
 
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
@@ -159,15 +211,60 @@ class PatchOverlayWindow(QWidget):
             pass
 
     # ------------------------------------------------------------ tipografi & sığdırma
+    # ------------------------------------------------------------ satır içi tuş ikonları
     @staticmethod
-    def _wrap_text(text: str, metrics: QFontMetricsF, max_w: float) -> list[str]:
+    def _icon_size(metrics: QFontMetricsF, icon_list) -> tuple:
+        """İkon atomunun boyutu: yükseklik ≈ satır yüksekliği, en-boy oranı korunur."""
+        h = metrics.height() * 1.0
+        if icon_list:
+            rgb = icon_list[0]["rgb"]
+            ih, iw = rgb.shape[:2]
+            return (max(4.0, iw * h / max(1, ih)), h)
+        return (0.0, h)
+
+    @staticmethod
+    def _pill_font(font: QFont) -> QFont:
+        pf = QFont(font)
+        px = font.pixelSize() if font.pixelSize() > 0 else int(round(QFontMetricsF(font).height() * 0.8))
+        pf.setPixelSize(max(7, int(round(px * 0.72))))
+        pf.setWeight(QFont.Bold)
+        return pf
+
+    @classmethod
+    def _atom_width(cls, token: str, metrics: QFontMetricsF, icon_map: dict, font: QFont = None) -> float:
+        icon_list = icon_map.get(token)
+        if icon_list:
+            return cls._icon_size(metrics, icon_list)[0] + 2.0
+        # İkon yoksa hap (pill): "R2" yazılı küçük yuvarlak çerçeve
+        label = "" if token.startswith(GLYPH_TOKEN) else token
+        pm = QFontMetricsF(cls._pill_font(font)) if font is not None else metrics
+        inner = pm.horizontalAdvance(label) if label else metrics.height() * 0.55
+        return inner + metrics.height() * 0.45 + 2.0
+
+    @classmethod
+    def _measure(cls, text: str, metrics: QFontMetricsF, icon_map: dict = None,
+                 font: QFont = None) -> float:
+        """Etiketleri ikon/hap atomu olarak sayan satır genişliği ölçümü."""
+        if not icon_map and "[" not in text:
+            return metrics.horizontalAdvance(text)
+        total = 0.0
+        for kind, val in _split_atoms(text, icon_map or {}):
+            if kind == "text":
+                total += metrics.horizontalAdvance(val)
+            else:
+                total += cls._atom_width(val, metrics, icon_map or {}, font)
+        return total
+
+    @classmethod
+    def _wrap_text(cls, text: str, metrics: QFontMetricsF, max_w: float,
+                   icon_map: dict = None, font: QFont = None) -> list[str]:
         words = text.replace("\r", " ").replace("\n", " ").split(" ")
         lines, cur = [], ""
         for w in words:
             if not w:
                 continue
             trial = f"{cur} {w}".strip()
-            if metrics.horizontalAdvance(trial) <= max_w or not cur:
+            if cls._measure(trial, metrics, icon_map, font) <= max_w or not cur:
                 cur = trial
             else:
                 lines.append(cur)
@@ -176,9 +273,68 @@ class PatchOverlayWindow(QWidget):
             lines.append(cur)
         return lines or [""]
 
-    def _fit_font_and_wrap(self, full_text: str, rect: QRectF, line_count: int):
+    def _draw_atoms(self, painter: QPainter, x: float, y: float, font: QFont,
+                    metrics: QFontMetricsF, text: str, icon_map: dict, icon_cursor: dict,
+                    fill_color: QColor, outline_color: QColor, keep_alive: list) -> float:
+        """
+        Metin parçalarını _draw_crisp_text ile, [TOKEN] etiketlerini orijinal ikon
+        pikselleriyle (yoksa hap) satır içi çizer. Döner: çizilen genişlik.
+        """
+        cx = x
+        for kind, val in _split_atoms(text, icon_map):
+            if kind == "text":
+                if val:
+                    self._draw_crisp_text(painter, cx, y, font, val, fill_color, outline_color)
+                    cx += metrics.horizontalAdvance(val)
+                continue
+            aw = self._atom_width(val, metrics, icon_map, font)
+            top = y - metrics.ascent()
+            icon_list = icon_map.get(val)
+            if icon_list:
+                # Aynı etiket birden çok geçerse ikonları sırayla kullan (son ikon tekrar eder)
+                k = icon_cursor.get(val, 0)
+                ic = icon_list[min(k, len(icon_list) - 1)]
+                icon_cursor[val] = k + 1
+                rgb = ic["rgb"]
+                ih, iw = rgb.shape[:2]
+                iw_draw, ih_draw = self._icon_size(metrics, [ic])
+                qimg = QImage(rgb.data, iw, ih, iw * 3, QImage.Format_RGB888)
+                keep_alive.append((rgb, qimg))  # numpy belleği çizim bitene kadar yaşasın
+                painter.drawImage(QRectF(cx + 1.0, top + (metrics.height() - ih_draw) / 2.0,
+                                         iw_draw, ih_draw), qimg)
+            else:
+                self._draw_button_pill(painter, cx + 1.0, top, aw - 2.0, metrics.height(),
+                                       "" if val.startswith(GLYPH_TOKEN) else val,
+                                       font, fill_color, outline_color)
+            cx += aw
+        return cx - x
+
+    def _draw_button_pill(self, painter: QPainter, x: float, top: float, w: float, h: float,
+                          label: str, font: QFont, fill_color: QColor, outline_color: QColor):
+        """İkonu bulunamayan tuş etiketi: açık çerçeveli küçük yuvarlak hap."""
+        ph = h * 0.82
+        r = QRectF(x, top + (h - ph) / 2.0, max(ph * 0.6, w), ph)
+        path = QPainterPath()
+        path.addRoundedRect(r, ph * 0.45, ph * 0.45)
+        painter.save()
+        painter.fillPath(path, QColor(outline_color.red(), outline_color.green(),
+                                      outline_color.blue(), 110))
+        painter.setPen(QPen(QColor(fill_color.red(), fill_color.green(), fill_color.blue(), 200), 1.2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        if label:
+            pf = self._pill_font(font)
+            painter.setFont(pf)
+            painter.setPen(fill_color)
+            painter.drawText(r, Qt.AlignCenter, label)
+            painter.setFont(font)
+        painter.restore()
+
+    def _fit_font_and_wrap(self, full_text: str, rect: QRectF, line_count: int,
+                           icon_map: dict = None):
         """
         Orijinal kutu sınırına sadık kalarak font boyutunu otomatik ölçekler.
+        icon_map: [TOKEN] etiketleri satır içi ikon atomu olarak ölçülür.
         Döner: (QFont, lines: list[str], QFontMetricsF)
         """
         pad_x = 10.0
@@ -200,11 +356,11 @@ class PatchOverlayWindow(QWidget):
             font.setPixelSize(px)
             font.setWeight(QFont.DemiBold)
             metrics = QFontMetricsF(font)
-            lines = self._wrap_text(full_text, metrics, avail_w)
+            lines = self._wrap_text(full_text, metrics, avail_w, icon_map, font)
 
             line_h = metrics.height() * 1.12
             total_h = line_h * len(lines)
-            max_line_w = max((metrics.horizontalAdvance(ln) for ln in lines), default=0.0)
+            max_line_w = max((self._measure(ln, metrics, icon_map, font) for ln in lines), default=0.0)
 
             best_font = font
             best_lines = lines
@@ -229,6 +385,7 @@ class PatchOverlayWindow(QWidget):
         )
 
         dpr = max(1.0, float(self.devicePixelRatioF() or 1.0))
+        keep_alive = []  # satır içi ikon QImage'larının numpy tamponları (painter.end'e kadar)
 
         for box in self._boxes:
             if getattr(box, "is_proper_noun", False):
@@ -286,8 +443,10 @@ class PatchOverlayWindow(QWidget):
             # 2) Konuşmacı ön eki ve otomatik ölçekli metin
             speaker = (getattr(box, "speaker", "") or "").strip()
             display_full = f"{speaker}: {tr_text}" if speaker else tr_text
+            icon_map = _build_icon_map(box)
+            icon_cursor: dict = {}
             font, lines, metrics = self._fit_font_and_wrap(
-                display_full, rect, getattr(box, "line_count", 1)
+                display_full, rect, getattr(box, "line_count", 1), icon_map
             )
             painter.setFont(font)
 
@@ -305,7 +464,7 @@ class PatchOverlayWindow(QWidget):
             speaker_prefix = f"{speaker}: " if speaker else ""
 
             for i, ln in enumerate(lines):
-                lw = metrics.horizontalAdvance(ln)
+                lw = self._measure(ln, metrics, icon_map, font)
                 if align == "center":
                     tx = rect.x() + (rect.width() - lw) / 2.0
                 else:
@@ -319,11 +478,12 @@ class PatchOverlayWindow(QWidget):
                                           speaker_color, outline_color)
                     sp_w = metrics.horizontalAdvance(speaker_prefix)
                     if rest:
-                        self._draw_crisp_text(painter, tx + sp_w, ty, font, rest,
-                                              fg_color, outline_color)
+                        self._draw_atoms(painter, tx + sp_w, ty, font, metrics, rest,
+                                         icon_map, icon_cursor, fg_color, outline_color,
+                                         keep_alive)
                 else:
-                    self._draw_crisp_text(painter, tx, ty, font, ln,
-                                          fg_color, outline_color)
+                    self._draw_atoms(painter, tx, ty, font, metrics, ln, icon_map,
+                                     icon_cursor, fg_color, outline_color, keep_alive)
 
         # 3) Dondur & Oku rozeti (F7 aktifken)
         if self._freeze_active:

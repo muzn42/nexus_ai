@@ -5,12 +5,27 @@ Her çevirinin kaynağını izler, istatistik tutar ve sonuçları önbelleğe a
 """
 import os
 import threading
+import time
 from collections import OrderedDict, deque
 from core.db_manager import DBManager, AutoLearnDB
 from core.llm_chain import BATCH_SYSTEM_PROMPT, LLMChain, SYSTEM_PROMPT
-from core.text_filter import split_speaker_prefix
+import re
+from core.text_filter import BUTTON_TOKENS, split_speaker_prefix
 
 ENGINE_CHAIN = "Akıllı Zincir (GPT-OSS → Gemini)"
+
+# '[R2]' / '[TRIANGLE]' gibi tuş etiketleri (yalnızca bilinen tuş adları; '[1]' numaraları değil)
+_BTN_TAG_RE = re.compile(r"\[([A-Za-z0-9\-]{1,10})\]")
+
+
+def _bare_button_tags(text: str) -> str:
+    """'Press [R2] to fire' -> 'Press R2 to fire' (yalnızca bilinen tuş etiketleri açılır)."""
+    if not text or "[" not in text:
+        return text
+    return _BTN_TAG_RE.sub(
+        lambda m: m.group(1) if m.group(1).upper().replace("-", "") in BUTTON_TOKENS else m.group(0),
+        text,
+    )
 
 
 # Çeviri kaynağı sabitleri
@@ -90,6 +105,7 @@ class TranslationEngine:
         if groq_api_key is not None:
             self.groq_api_key = groq_api_key
             self._groq_client = None
+            self._groq_cooldown_until = 0.0
         if gemini_api_key is not None:
             self.gemini_api_key = gemini_api_key
             self._gemini_model = None
@@ -131,19 +147,28 @@ class TranslationEngine:
                 self._cache.move_to_end(cache_key)
                 return result, SOURCE_CACHE
 
-        db_result, tag = self.db_manager.find_translation(clean_text)
-        if db_result:
-            source_tag = SOURCE_GOLDEN if tag == "ALTIN" else SOURCE_DB
-            self.stats[source_tag] += 1
-            self._add_to_cache(cache_key, db_result)
-            return db_result, source_tag
+        # '[R2]' gibi tuş etiketleri DB'de yalın ('Press R2 to fire') saklanır; etiketli arama
+        # tutmazsa yalın metinle tekrar dene. DB sonucu etiketsizse olduğu gibi döner.
+        variants = [clean_text]
+        bare = _bare_button_tags(clean_text)
+        if bare and bare != clean_text:
+            variants.append(bare)
+
+        for variant in variants:
+            db_result, tag = self.db_manager.find_translation(variant)
+            if db_result:
+                source_tag = SOURCE_GOLDEN if tag == "ALTIN" else SOURCE_DB
+                self.stats[source_tag] += 1
+                self._add_to_cache(cache_key, db_result)
+                return db_result, source_tag
 
         if self.auto_learn_enabled and self.auto_learn_db is not None:
-            learned = self.auto_learn_db.find(clean_text)
-            if learned:
-                self.stats[SOURCE_LEARNED] += 1
-                self._add_to_cache(cache_key, learned)
-                return learned, SOURCE_LEARNED
+            for variant in variants:
+                learned = self.auto_learn_db.find(variant)
+                if learned:
+                    self.stats[SOURCE_LEARNED] += 1
+                    self._add_to_cache(cache_key, learned)
+                    return learned, SOURCE_LEARNED
 
         return "", ""
 
@@ -363,27 +388,42 @@ class TranslationEngine:
             self._last_ok = False
             return "[Hata] Groq API Anahtarı girilmedi"
         system_prompt = SYSTEM_PROMPT.format(lang=self.target_language)
-        try:
-            return self._groq_call(system_prompt, f"Translate:\n{text}",
-                                   max_tokens=120, on_partial=on_partial)
-        except Exception as e:
-            print(f"[GROQ] Hata: {e}")
-            return self._translate_google(text)
+        if time.time() >= getattr(self, "_groq_cooldown_until", 0.0):
+            try:
+                return self._groq_call(system_prompt, f"Translate:\n{text}",
+                                       max_tokens=120, on_partial=on_partial)
+            except Exception as e:
+                print(f"[GROQ] Hata: {str(e)[:160]}")
+                # Kota (429) dolunca her satırda boşuna denemeyelim
+                wait = 300.0 if getattr(e, "status_code", None) == 429 else 20.0
+                self._groq_cooldown_until = time.time() + wait
+        # Groq kotada/hatalıysa önce Akıllı Zincir (GPT-OSS/Gemini), en son Google
+        with self._context_lock:
+            ctx_snap = list(self.context)
+        result, _label = self.chain.translate(text, ctx_snap, self.target_language, on_partial)
+        if result:
+            return result
+        return self._translate_google(text)
 
     def _translate_groq_batch(self, texts: list[str]) -> list:
         if not self.groq_api_key or not texts:
             return []
         if len(texts) == 1:
             return [self._translate_groq(texts[0])]
-        numbered = "\n".join(f"[{i + 1}] {t}" for i, t in enumerate(texts))
-        try:
-            raw = self._groq_call(
-                BATCH_SYSTEM_PROMPT.format(lang=self.target_language),
-                numbered, max_tokens=max(400, len(texts) * 90))
-            return LLMChain._parse_batch_response(raw, len(texts))
-        except Exception as e:
-            print(f"[GROQ BATCH] Hata: {e}")
-            return []
+        if time.time() >= getattr(self, "_groq_cooldown_until", 0.0):
+            numbered = "\n".join(f"[{i + 1}] {t}" for i, t in enumerate(texts))
+            try:
+                raw = self._groq_call(
+                    BATCH_SYSTEM_PROMPT.format(lang=self.target_language),
+                    numbered, max_tokens=max(400, len(texts) * 90))
+                return LLMChain._parse_batch_response(raw, len(texts))
+            except Exception as e:
+                print(f"[GROQ BATCH] Hata: {str(e)[:160]}")
+                wait = 300.0 if getattr(e, "status_code", None) == 429 else 20.0
+                self._groq_cooldown_until = time.time() + wait
+        # Groq kotadaysa toplu isteği Akıllı Zincir'e (GPT-OSS/Gemini) devret
+        out, _label = self.chain.translate_batch(texts, self.target_language)
+        return out
 
     # --- GOOGLE TRANSLATE ---
     def _ensure_google(self):

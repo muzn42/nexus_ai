@@ -4,10 +4,68 @@ Profil koordinatları ve uygulama ayarlarının kalıcı olarak disk'e
 kaydedilip okunmasından sorumlu modül.
 """
 import os
+import sys
 import json
+import shutil
 
 # --- YOL YAPISI ---
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Geliştirmede (python main.py) her şey depo kökündedir.
+# Paketli (PyInstaller) sürümde:
+#   BUNDLE_DIR → salt-okunur paket içi (_internal: kod, OCR modelleri)
+#   BASE_DIR   → yazılabilir kullanıcı alanı (exe'nin yanı; yazılamıyorsa %APPDATA%\NEXUS AI)
+_SEED_DIRS = ("config", "data", "assets", "tools")
+
+
+def _is_writable_dir(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".nexus_write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _seed_user_dir(src_root: str, dst_root: str):
+    """Exe yanındaki varsayılan dosyaları (yoksa) kullanıcı klasörüne kopyalar; mevcutları ezmez."""
+    for name in _SEED_DIRS:
+        src = os.path.join(src_root, name)
+        if not os.path.isdir(src):
+            continue
+        for root, _dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src_root)
+            os.makedirs(os.path.join(dst_root, rel), exist_ok=True)
+            for fn in files:
+                dst = os.path.join(dst_root, rel, fn)
+                if not os.path.exists(dst):
+                    try:
+                        shutil.copy2(os.path.join(root, fn), dst)
+                    except OSError:
+                        pass
+
+
+def _resolve_dirs() -> tuple:
+    if not getattr(sys, "frozen", False):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return root, root
+    bundle = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    override = os.environ.get("NEXUS_HOME", "").strip()
+    if override and _is_writable_dir(override):
+        _seed_user_dir(exe_dir, override)
+        return override, bundle
+    if _is_writable_dir(exe_dir):
+        return exe_dir, bundle
+    user_dir = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "NEXUS AI")
+    os.makedirs(user_dir, exist_ok=True)
+    _seed_user_dir(exe_dir, user_dir)
+    return user_dir, bundle
+
+
+BASE_DIR, BUNDLE_DIR = _resolve_dirs()
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
@@ -65,6 +123,7 @@ DEFAULT_SETTINGS = {
     "noise_filter_enabled": True,
     "stabilization_frames": 2,
     "world_scan_interval": 0.55,      # Altyazı dışı dünya/UI tarama aralığı (sn)
+    "ocr_max_width_full": 1280,       # Dünya OCR küçültme genişliği (960 → ikon/kutu sınırları kayıyordu)
 
     # Kaynak
     "source_type": "screen",

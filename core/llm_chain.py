@@ -33,7 +33,9 @@ SYSTEM_PROMPT = (
     "cities/neighborhoods/streets (Vice City, Leonida, Ocean Beach, Vice Beach, etc.), "
     "vehicle/weapon models, and in-game brands (LifeInvader, Weazel News, Sprunk, etc.) MUST stay in their original spelling.\n"
     "2. If the text consists ONLY of a proper noun, place name, or brand name, output it EXACTLY as-is.\n"
-    "3. Keep key/button tags like [E], [F], [SPACE], [R1], [LSHIFT] unchanged.\n"
+    "3. Key/button tags like [E], [SPACE], [R1], [R2], [L1], [L2], [R3], [L3], [X], [O], [TRIANGLE], [SQUARE], "
+    "[OPTIONS], [TOUCHPAD], [BTN], [BTN2] are on-screen icons: keep every [TAG] exactly once, unchanged, "
+    "placed where it reads naturally (e.g. 'Press [R2] to fire' -> 'Ateş etmek için [R2] tuşuna bas').\n"
     "4. Output ONLY the translation of the last line, without quotes, notes, or explanations."
 )
 
@@ -44,7 +46,10 @@ BATCH_SYSTEM_PROMPT = (
     "1. NEVER translate proper nouns: character names, cities/regions/streets (Vice City, Leonida, Ocean Beach, Vice Beach, etc.), "
     "vehicle/weapon models, or in-game brands (LifeInvader, Weazel News, Sprunk, etc.) MUST stay unchanged.\n"
     "2. If a numbered item is ONLY a proper noun/place/brand, keep it EXACTLY unchanged.\n"
-    "3. Preserve button/key prompts like [E], [F], [SPACE], [R1] as-is.\n"
+    "3. Key/button tags like [E], [SPACE], [R1], [R2], [L1], [L2], [R3], [L3], [X], [O], [TRIANGLE], [SQUARE], "
+    "[OPTIONS], [TOUCHPAD], [BTN], [BTN2] are on-screen icons: keep every [TAG] exactly once, unchanged, "
+    "placed where it reads naturally (e.g. 'Press [R2] to fire' -> 'Ateş etmek için [R2] tuşuna bas'). "
+    "Item numbers like [1] are NOT tags.\n"
     "4. Keep the EXACT same numbering format ([1] ..., [2] ...) with one translation per item. No extra commentary."
 )
 

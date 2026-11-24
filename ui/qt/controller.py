@@ -43,7 +43,7 @@ class Controller(QObject):
         self.library = DictionaryLibrary()
 
         self.db_manager = DBManager(self.settings.get("db_path", ""))
-        self.auto_learn = AutoLearnDB(DATA_DIR)
+        self.auto_learn = AutoLearnDB(DATA_DIR, self.settings.get("db_path", ""))
         self.ocr_engine = self._build_ocr()
         self.world_ocr_engine = self._build_world_ocr()
         self.translator = self._build_translator()
@@ -145,6 +145,12 @@ class Controller(QObject):
         self.settings["db_path"] = db_path or ""
         self.save()
         self.db_manager.reload(self.settings["db_path"])
+        # öğrenilenler oyuna özel: öğrenme deposunu yeni sözlüğe taşı, eski oyunun bellek önbelleğini at
+        self.auto_learn.set_db(self.settings["db_path"])
+        tr = getattr(self, "translator", None)
+        if tr is not None and hasattr(tr, "_cache"):
+            with tr._cache_lock:
+                tr._cache.clear()
         entry = self.library.find_by_path(db_path)
         if announce and entry:
             self.toast.emit(f"Aktif sözlük: {entry.game}", "ok")

@@ -178,7 +178,8 @@ class WindowSource(ScreenSource):
       - Pencere taşınsa / yeniden boyutlansa bile takip eder
       - Donanım hızlandırmalı içerik (video oynatıcı, oyun, Remote Play)
         PrintWindow'da siyah çıkar; bu yöntemde sorunsuz çalışır
-    Sınır: pencere başka bir pencerenin altında kalırsa o görüntü yakalanır.
+    Üste gelen başka uygulama pencereleri karede siyaha maskelenir (occluding_rects);
+    seçili pencere neredeyse tamamen kapalıysa kare atlanır.
     """
 
     name = "window"
@@ -256,4 +257,29 @@ class WindowSource(ScreenSource):
             h -= self.inset * 2
         if w <= 0 or h <= 0:
             return None
-        return super().grab((x, y, w, h))
+        frame = super().grab((x, y, w, h))
+        if frame is None:
+            return None
+        return self._mask_occluders(frame, (x, y, w, h))
+
+    def _mask_occluders(self, frame, region):
+        """Seçili pencerenin üstüne gelen başka pencerelerin alanını siyaha boyar.
+        Bölgenin %85'inden fazlası kapalıysa kare atlanır (None)."""
+        import time
+        from core.windows import occluding_rects
+        rects = occluding_rects(self.hwnd, region)
+        if not rects:
+            return frame
+        x0, y0, w, h = region
+        fh, fw = frame.shape[:2]
+        mask = np.zeros((fh, fw), dtype=bool)
+        for ox, oy, ow, oh in rects:
+            mask[max(0, oy - y0):max(0, oy - y0 + oh), max(0, ox - x0):max(0, ox - x0 + ow)] = True
+        covered = float(mask.mean())
+        if covered > 0.85:
+            if time.time() - self._last_warn > 5:
+                print("[CAPTURE] Seçili pencerenin üstünde başka pencere var; kare atlandı.")
+                self._last_warn = time.time()
+            return None
+        frame[mask] = 0
+        return frame

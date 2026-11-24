@@ -15,10 +15,15 @@ Hız mimarisi:
 import difflib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from core.box_tracker import BoxTracker, TrackedBox
+try:
+    from core.button_icons import attach_button_icons
+except Exception:  # modül yoksa ikon koruma devre dışı, hat çalışmaya devam eder
+    attach_button_icons = None
 from core.capture import make_source
 from core.ocr_engine import OCREngine, merge_nearby_boxes
 from core.text_filter import (
@@ -74,6 +79,11 @@ class TranslationPipeline:
         self._last_world_ocr_ts = 0.0
         self._sub_box_seq = 1_000_000
 
+        # Dünya çevirisi ayrı iş parçacığında: ağ beklerken dünya OCR döngüsü durmaz.
+        # _gen her sıfırlamada artar; eski nesil işler bitince ekrana yazmaz.
+        self._tr_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nexus-world-tr")
+        self._gen = 0
+
         self.tracker = BoxTracker()
         self.stats = {
             "ocr_ms": 0.0, "world_ocr_ms": 0.0, "tr_ms": 0.0, "source": "",
@@ -87,6 +97,7 @@ class TranslationPipeline:
     # ------------------------------------------------------------ durum & kontrol
     def _reset_runtime_state(self, clear_prev_img: bool = True):
         with self._box_lock:
+            self._gen += 1
             self.tracker.clear()
             self._prev_full = None
             self._latest_frame = None
@@ -284,14 +295,7 @@ class TranslationPipeline:
                     with self._box_lock:
                         pending = self.tracker.promote_pending(frame, stabilization_frames=stab)
                     if pending:
-                        tr_ms, last_src = self._translate_pending_boxes(pending)
-                        with self._box_lock:
-                            self._update_tr_stats(tr_ms, last_src)
-                            combined = self._combined_boxes_locked()
-                            self.stats["boxes"] = len(combined)
-                            fh, fw = frame.shape[:2]
-                            self._emit_active_outputs(mode, combined, origin, (fw, fh))
-                            self._emit("on_stats", dict(self.stats))
+                        self._translate_world_async(pending)
                     time.sleep(0.05)
                     continue
 
@@ -417,7 +421,7 @@ class TranslationPipeline:
         return auto_subtitle_roi(fw, fh)
 
     def _filter_and_merge(self, raw_boxes: list[dict], use_noise: bool,
-                          frame_bgr=None) -> list[dict]:
+                          frame_bgr=None, strict_icons: bool = False) -> list[dict]:
         filtered = []
         for b in raw_boxes:
             if use_noise and not is_translatable_game_text(b["text"], b["score"], b["bbox"]):
@@ -434,7 +438,15 @@ class TranslationPipeline:
                 b for b in merged
                 if is_translatable_game_text(b["text"], b["score"], b["bbox"])
             ]
-        return trim_button_icons_from_boxes(raw_boxes, merged, frame_bgr=frame_bgr)
+        kept = trim_button_icons_from_boxes(raw_boxes, merged, frame_bgr=frame_bgr)
+        # Satır içi tuş ikonlarının (R2, L1, X...) orijinal piksellerini yama için sakla
+        if attach_button_icons is not None and frame_bgr is not None:
+            for b in kept:
+                try:
+                    attach_button_icons(b, frame_bgr, strict=strict_icons)
+                except Exception:
+                    pass
+        return kept
 
     @staticmethod
     def _filter_auto_subtitle_boxes(boxes: list[dict], sx: int, sw: int,
@@ -501,7 +513,8 @@ class TranslationPipeline:
         self.stats["ocr_ms"] = round((time.time() - t0) * 1000, 1)
 
         use_noise = bool(self.settings.get("noise_filter_enabled", True))
-        merged = self._filter_and_merge(raw_boxes, use_noise=use_noise, frame_bgr=full_frame)
+        merged = self._filter_and_merge(raw_boxes, use_noise=use_noise, frame_bgr=full_frame,
+                                        strict_icons=True)
         if not self.roi:
             merged = self._filter_auto_subtitle_boxes(merged, sx, sw, fw, fh)
 
@@ -531,6 +544,8 @@ class TranslationPipeline:
                         old.smoothed_bbox = tuple(float(v) for v in bbox)
                         old.line_count = line_count
                         old.last_seen = now_ts
+                        if b.get("icons"):
+                            old.icons = list(b["icons"])
                         matched = old
                         break
             if matched is not None:
@@ -557,6 +572,7 @@ class TranslationPipeline:
                 is_proper_noun=False,
                 translation_requested=True,
             )
+            sub_box.icons = list(b.get("icons") or [])
             new_boxes.append(sub_box)
             to_translate.append((sub_box, text))
 
@@ -640,13 +656,7 @@ class TranslationPipeline:
                 with self._box_lock:
                     pending = self.tracker.promote_pending(full_frame, stabilization_frames=stab)
                 if pending:
-                    tr_ms, last_src = self._translate_pending_boxes(pending)
-                    with self._box_lock:
-                        self._update_tr_stats(tr_ms, last_src)
-                        combined = self._combined_boxes_locked()
-                        self.stats["boxes"] = len(combined)
-                        self._emit_active_outputs(mode, combined, origin, (fw, fh))
-                        self._emit("on_stats", dict(self.stats))
+                    self._translate_world_async(pending)
                 return
             rx, ry, rw, rh = dirty_rect
         else:
@@ -689,6 +699,16 @@ class TranslationPipeline:
                 scanned_region=scanned_region,
                 style_sampler=lambda fr, bb: sample_box_style(fr, bb, frame_w=fw),
             )
+
+        if not is_freeze:
+            # Canlı modda çeviri arka planda; şimdilik mevcut (çevrilmiş) kutuları yay
+            self._translate_world_async(need_tr)
+            with self._box_lock:
+                combined = self._combined_boxes_locked()
+                self.stats["boxes"] = len(combined)
+                self._emit_active_outputs(mode, combined, origin, (fw, fh))
+                self._emit("on_stats", dict(self.stats))
+            return
 
         tr_ms, last_src = self._translate_pending_boxes(need_tr)
 
@@ -743,6 +763,42 @@ class TranslationPipeline:
         # 4) Dünya / UI OCR Pass
         self._last_world_ocr_ts = now
         self._process_world_pass(full_frame, origin, mode, is_freeze=is_freeze, stab=stab)
+
+    def _translate_world_async(self, need_tr: list[TrackedBox]):
+        """Dünya kutularını arka planda toplu çevirir; bitince güncel kutuları yayar."""
+        if not need_tr:
+            return
+        for b in need_tr:
+            b.translation_requested = True
+        gen = self._gen
+
+        def _job():
+            try:
+                tr_ms, last_src = self._translate_pending_boxes(need_tr)
+            except Exception as e:
+                self._emit("on_error", f"{e}")
+                return
+            if self._stop.is_set() or self._frozen or gen != self._gen:
+                return
+            frame = self._latest_frame
+            if frame is None or not getattr(frame, "size", 0):
+                return
+            fh, fw = frame.shape[:2]
+            mode = self.settings.get("patch_mode", "full_patch")
+            with self._box_lock:
+                if gen != self._gen:
+                    return
+                self._update_tr_stats(tr_ms, last_src)
+                combined = self._combined_boxes_locked()
+                self.stats["boxes"] = len(combined)
+                self._emit_active_outputs(mode, combined, self._latest_origin, (fw, fh))
+                self._emit("on_stats", dict(self.stats))
+
+        try:
+            self._tr_executor.submit(_job)
+        except RuntimeError:
+            # Executor kapatılmışsa eşzamanlı çevir
+            _job()
 
     def _translate_pending_boxes(self, need_tr: list[TrackedBox]) -> tuple[float, str]:
         if not need_tr:

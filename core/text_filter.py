@@ -41,18 +41,175 @@ _KNOWN_WATERMARKS = {
 }
 _LEADING_GLYPH_RE = re.compile(r"^[①-⑳ⓐ-ⓩ●○◆◇■□▲△▼▽★☆•·\?\!@#%&]+\s*")
 _FUSED_BUTTON_END_RE = re.compile(
-    r"^(SELECT|BACK|RESET|HOLD|PRESS|USE|EQUIP|DROP|SKIP|CANCEL|CONFIRM|EXIT|"
+    # HOLD/PRESS/USE burada YOK: 'Use R' / 'PRESS X' satır içi ikon olarak '[R]' / '[X]' etiketlenir
+    r"^(SELECT|BACK|RESET|EQUIP|DROP|SKIP|CANCEL|CONFIRM|EXIT|"
     r"OPEN|CLOSE|MAP|JUMP|CROUCH|PHOTO STUDIO|PHOTO MODE)"
-    r"(?:\s+[XOYABERF123]|\s*[XOY])$",
+    # 'SELECT X', 'BACK O', 'SELECTX', 'SELECT [X]', 'BACK (O)', 'MAP R3' -> yalın etiket
+    r"(?:\s+[\[\(]?\s*(?:[XOYABERF123]|[RL][123])\s*[\]\)]?|\s*[XOY])$",
     re.IGNORECASE,
 )
 _INLINE_VERB_JOIN_RE = re.compile(
     r"\b(Hold|Press|Tap|Use|Push)(while|to|for|and|the|when)\b",
     re.IGNORECASE,
 )
-_INLINE_BARE_BTN_RE = re.compile(
-    r"\b((?i:Use|Hold|Press|Tap))\s+([RXLOBAY])\s+((?i:to|while|for|and))\b"
-)
+
+# ---------------------------------------------------------------------------
+# Paylaşılan Tuş (Buton) Etiketi API'si
+# Diğer modüller (ikon koruma / satır içi ikon çizimi) bu isimleri doğrudan içe aktarır;
+# isimleri değiştirmeyin: BUTTON_TOKENS, button_token(), tag_button_tokens().
+# ---------------------------------------------------------------------------
+BUTTON_TOKENS = frozenset({
+    # PlayStation
+    "R1", "R2", "R3", "L1", "L2", "L3", "R", "L",
+    "X", "O", "TRIANGLE", "SQUARE", "CIRCLE", "CROSS",
+    "OPTIONS", "TOUCHPAD", "SHARE", "CREATE", "PS", "DPAD",
+    "LS", "RS",
+    # Xbox
+    "LB", "RB", "LT", "RT", "A", "B", "Y", "MENU", "VIEW",
+})
+
+# OCR/glif varyantları -> kanonik etiket
+_BUTTON_ALIASES = {
+    "D-PAD": "DPAD", "D_PAD": "DPAD", "DPAD": "DPAD",
+    "TOUCH-PAD": "TOUCHPAD", "TOUCH PAD": "TOUCHPAD",
+    "△": "TRIANGLE", "▲": "TRIANGLE",
+    "□": "SQUARE", "■": "SQUARE",
+    "○": "O", "◯": "O",
+    "×": "X", "✕": "X", "✖": "X", "⊗": "X", "Ⓧ": "X", "ⓧ": "X",
+    # Daire içindeki R/L (sağ/sol çubuk) OCR'da sıklıkla '®' okunur ('Use ® to select')
+    "®": "R", "Ⓡ": "R", "ⓡ": "R", "Ⓛ": "L", "ⓛ": "L",
+}
+# Harf/rakam olmayan glif takma adları kesin ikondur; bağlam aramadan etiketlenir
+_GLYPH_ICON_ALIASES = frozenset(k for k in _BUTTON_ALIASES if not any(c.isalnum() for c in k))
+
+# OCR'ın rozeti metne yapıştırması: 'R2Accelerate' -> '[R2] Accelerate'
+_GLUED_LEAD_BTN_RE = re.compile(r"^[\[\(]?([RL][123])[\]\)]?(?=[A-Z][a-z]{2,})")
+# Rozetin rakam sanılması: '12Brake and reverse' (L2) -> 'Brake and reverse'
+_GLUED_LEAD_MISREAD_RE = re.compile(r"^[1Il|][123](?=[A-Z][a-z]{2,})")
+
+# İngilizce kelime OLMAYAN kod-benzeri tuşlar: tek başına yazıldıklarında bile etiketlenir.
+_CODE_TOKENS = frozenset({
+    "R1", "R2", "R3", "L1", "L2", "L3", "LB", "RB", "LT", "RT", "LS", "RS", "DPAD",
+})
+# Bağlam gerektiren tuşlar (tek harfler ve 'Options', 'Share', 'Cross' gibi gerçek kelimeler)
+_PRESS_VERBS = frozenset({"press", "hold", "tap", "use", "push", "release", "mash", "click"})
+_BTN_CONNECTORS = frozenset({"to", "while", "for", "and", "or", "button", "then"})
+_BTN_STRIP_CHARS = "[](){}<>.,!?:;\"' "
+_WORD_PARTS_RE = re.compile(r"^([\[\(\{<]*)(.*?)([\]\)\}>]*)([.,!?:;\"']*)$")
+
+
+def button_token(word: str):
+    """
+    Tek bir OCR kelimesini kanonik tuş adına çevirir ('(R2)' -> 'R2', '[l1]' -> 'L1',
+    'R2.' -> 'R2', 'D-PAD' -> 'DPAD', '△' -> 'TRIANGLE'); tuş değilse None döner.
+
+    NOT: Bağlamdan bağımsızdır; tek harfler ('A', 'B', 'X', 'O', 'Y', 'R', 'L') ve
+    'Options'/'Share'/'Create'/'Cross' gibi gerçek İngilizce kelimeler de token
+    olarak döner. İngilizce 'a' artikeli mi yoksa tuş mu olduğuna ÇAĞIRAN karar verir
+    (bkz. tag_button_tokens bağlam kuralı).
+    """
+    if not word:
+        return None
+    core = str(word).strip(_BTN_STRIP_CHARS)
+    if not core:
+        return None
+    up = core.upper()
+    if up in _BUTTON_ALIASES:
+        return _BUTTON_ALIASES[up]
+    if up in BUTTON_TOKENS:
+        return up
+    return None
+
+
+def _is_wrapped(lead: str, close: str) -> bool:
+    return bool(lead) and bool(close)
+
+
+def _is_icon_word(word: str) -> bool:
+    """Kelime kesinlikle bir tuş ikonu mu? (köşeli/parantezli token veya kod-benzeri token)"""
+    tok = button_token(word)
+    if not tok:
+        return False
+    m = _WORD_PARTS_RE.match(word)
+    if m and _is_wrapped(m.group(1), m.group(3)):
+        return True
+    if m and m.group(2).upper() in _GLYPH_ICON_ALIASES:
+        return True
+    return tok in _CODE_TOKENS
+
+
+def tag_button_tokens(text: str) -> str:
+    """
+    Cümle içindeki tuş adlarını köşeli parantezle etiketler (LLM bunları korur):
+      'Press R2 to fire'   -> 'Press [R2] to fire'
+      'Hold (L2) to aim'   -> 'Hold [L2] to aim'
+      'Use R to select'    -> 'Use [R] to select'
+      'Press L1/R1'        -> 'Press [L1]/[R1]'
+    Kurallar:
+      - Zaten parantezli/köşeli tuşlar ('(L2)', '[X]') her zaman '[L2]' biçimine getirilir.
+      - Kod-benzeri tuşlar (R1..R3, L1..L3, LB, RB, LT, RT, LS, RS, DPAD) tek başına
+        kelime olduklarında her zaman etiketlenir.
+      - Tek harfler (X, O, A, B, Y, R, L) yalnızca BÜYÜK harfle yazılmışsa, önünde
+        Press/Hold/Tap/Use/Push gibi bir fiil varsa VE ardından to/while/for/and/or
+        gelirse ya da cümle bitiyorsa etiketlenir ('a car' / 'A car' etiketlenmez).
+      - Kelime-tuşlar (OPTIONS, TOUCHPAD, TRIANGLE, SQUARE, CIRCLE, CROSS, SHARE,
+        CREATE, PS, MENU, VIEW) önünde fiil varsa ya da BÜYÜK harfle yazılıp ardından
+        bağlaç geliyorsa etiketlenir; tek başına menü öğesi 'Options' etiketlenmez.
+      - 'Press X or O to ...' gibi zincirlerde önceki etiketten sonra gelen
+        'or/and/,' bağlacı da fiil yerine geçer.
+    """
+    words = (text or "").split()
+    if not words:
+        return ""
+    out = []
+    prev_ok_ctx = False  # önceki kelime fiil mi / etiket+bağlaç zinciri mi
+    last_tagged = False
+    for i, w in enumerate(words):
+        m = _WORD_PARTS_RE.match(w)
+        lead, core, close, punct = m.groups() if m else ("", w, "", "")
+        nxt = words[i + 1].strip(_BTN_STRIP_CHARS).lower() if i + 1 < len(words) else ""
+        at_end = (i + 1 >= len(words)) or bool(punct)
+        low_core = core.lower()
+
+        tagged = None
+        # 'L1/R1' gibi eğik çizgili çift tuşlar
+        if "/" in core and not lead and not close:
+            parts = core.split("/")
+            toks = [button_token(p) for p in parts]
+            if len(parts) >= 2 and all(t and t in _CODE_TOKENS for t in toks):
+                tagged = "/".join(f"[{t}]" for t in toks) + punct
+
+        if tagged is None:
+            tok = button_token(core) if core else None
+            if tok:
+                wrapped = _is_wrapped(lead, close) or core.upper() in _GLYPH_ICON_ALIASES
+                ok = False
+                if wrapped or tok in _CODE_TOKENS:
+                    ok = True
+                elif len(core) == 1:
+                    ok = core.isupper() and prev_ok_ctx and (nxt in _BTN_CONNECTORS or at_end)
+                else:
+                    ok = prev_ok_ctx or (core.isupper() and nxt in _BTN_CONNECTORS and i > 0)
+                if ok:
+                    tagged = f"[{tok}]" + punct
+
+        if tagged is not None:
+            out.append(tagged)
+            last_tagged = True
+            prev_ok_ctx = False
+            continue
+
+        out.append(w)
+        if low_core in _PRESS_VERBS:
+            prev_ok_ctx = True
+        elif last_tagged and (low_core in ("or", "and", "then") or w in (",", "/", "+")):
+            prev_ok_ctx = True
+        else:
+            prev_ok_ctx = False
+        last_tagged = False
+        if punct:
+            prev_ok_ctx = prev_ok_ctx and punct == ","
+    return " ".join(out)
 _SPEAKER_RE = re.compile(r"^([A-Za-zÇĞIİÖŞÜçğıöşü0-9][A-Za-zÇĞIİÖŞÜçğıöşü0-9\s\.\-']{0,24}):\s+(.+)$")
 _WATERMARK_RE = re.compile(
     r"^(?:https?://\S+|www\.\S+|@\S+|[A-Za-z0-9\-_]{2,}\.(?:com|net|org|tv|gg|io|co))$",
@@ -65,10 +222,13 @@ def clean_ocr_game_text(text: str) -> str:
     cleaned = " ".join((text or "").strip().split())
     if not cleaned:
         return ""
-    cleaned = _LEADING_GLYPH_RE.sub("", cleaned).strip()
+    cleaned = _LEADING_GLYPH_RE.sub("", cleaned).strip()  # '@GET UP' (X dairesi) -> 'GET UP'
+    cleaned = _GLUED_LEAD_BTN_RE.sub(r"\1 ", cleaned)
+    cleaned = _GLUED_LEAD_MISREAD_RE.sub("", cleaned).strip()
     cleaned = _FUSED_BUTTON_END_RE.sub(r"\1", cleaned).strip()
     cleaned = _INLINE_VERB_JOIN_RE.sub(r"\1 \2", cleaned)
-    cleaned = _INLINE_BARE_BTN_RE.sub(r"\1 [\2] \3", cleaned)
+    # Satır içi tuş ikonlarını '[R2]' biçiminde etiketle (LLM korur, overlay ikon çizer)
+    cleaned = tag_button_tokens(cleaned)
     return " ".join(cleaned.split())
 
 
@@ -96,6 +256,11 @@ def is_translatable_game_text(text: str, score: float = 1.0, bbox: tuple = None)
 
     low = cleaned.lower().strip("[](){}<>.,!?-_:;\"' ")
     if not low or low in _NOISE_EXACT:
+        return False
+
+    # Yalnızca tuş ikonlarından oluşan kutular ('R2', '[R2]', '(X)', '[L1] [R1]', '[L1]/[R1]')
+    icon_words = cleaned.replace("/", " ").split()
+    if icon_words and all(_is_icon_word(w) for w in icon_words):
         return False
 
     compact = re.sub(r"[^a-z0-9]", "", low)
@@ -365,11 +530,14 @@ def trim_button_icons_from_boxes(raw_boxes: list[dict], kept_boxes: list[dict],
     if not kept_boxes:
         return []
 
-    icon_boxes = [
-        b["bbox"] for b in (raw_boxes or [])
-        if not is_translatable_game_text(b["text"], b["score"], b["bbox"])
-        and len((b.get("text") or "").strip()) <= 3
-    ]
+    # OCR'ın elediği tekil tuş kutuları: kısa gürültüler (X, O, R) + açık tuş adları ('(R2)', 'TRIANGLE')
+    icon_boxes = []
+    for b in (raw_boxes or []):
+        rt = (b.get("text") or "").strip()
+        if is_translatable_game_text(rt, b.get("score", 1.0), b["bbox"]):
+            continue
+        if len(rt) <= 3 or button_token(rt):
+            icon_boxes.append(b["bbox"])
 
     fh = fw = 0
     if frame_bgr is not None and hasattr(frame_bgr, "shape") and frame_bgr.size > 0:
@@ -391,7 +559,7 @@ def trim_button_icons_from_boxes(raw_boxes: list[dict], kept_boxes: list[dict],
         by_mid = by + bh * 0.5
 
         # A) OCR tarafından yakalanıp elenen bitişik tekil tuş kutularını (X, O, R vb.) dışla
-        if len(words) < 4:
+        if len(words) <= 5:
             for ix, iy, iw, ih in icon_boxes:
                 if abs((iy + ih * 0.5) - by_mid) > max(bh, ih) * 0.75:
                     continue
@@ -405,8 +573,10 @@ def trim_button_icons_from_boxes(raw_boxes: list[dict], kept_boxes: list[dict],
                         bw = (bx + bw) - new_x1
                         bx = new_x1
 
-        # B) Kısa HUD etiketlerinin ucuna bitişmiş OCR-dışı ikon bloklarını (açık/koyu zemin) kırp
-        if has_cv2 and bh <= 38 and len(words) <= 3 and bw >= 16 and bh >= 8:
+        # B) Kısa HUD etiketlerinin ucuna bitişmiş OCR-dışı ikon bloklarını (açık/koyu zemin) kırp.
+        # Eşik çözünürlüğe görelidir: 720p'de 38 px, 1080p'de ~65 px, 4K'da ~130 px HUD yazısı.
+        max_hud_h = max(38.0, fh * 0.06)
+        if has_cv2 and bh <= max_hud_h and len(words) <= 5 and bw >= 16 and bh >= 8:
             x1 = max(0, bx)
             y1 = max(0, by)
             x2 = min(fw, bx + bw)
@@ -420,7 +590,8 @@ def trim_button_icons_from_boxes(raw_boxes: list[dict], kept_boxes: list[dict],
                 min_gap = max(3, int(round(bh * 0.24)))
                 runs = _find_col_runs(active, min_gap)
                 n_words = max(1, len(words))
-                min_text_w = len(text.replace(" ", "")) * bh * 0.22
+                bare_text = re.sub(r"[\[\]\s]", "", text)
+                min_text_w = len(bare_text) * bh * 0.22
                 max_icon_w = 1.12 * bh
                 if len(runs) >= 2:
                     r_start, r_end = runs[-1]
@@ -448,5 +619,21 @@ def trim_button_icons_from_boxes(raw_boxes: list[dict], kept_boxes: list[dict],
                             bw -= shift
 
         b["bbox"] = (int(bx), int(by), int(max(1, bw)), int(max(1, bh)))
+
+        # Kelime düzeyi kutular (isteğe bağlı 'words'): kırpılan bölgede kalan kelimeleri
+        # (uçtaki ikon) at; kutu içindeki satır içi tuş kelimeleri ('R2') korunur.
+        wlist = b.get("words")
+        if wlist:
+            x_lo, x_hi = bx - 1, bx + max(1, bw) + 1
+            kept_words = []
+            for wd in wlist:
+                wb = wd.get("bbox") if isinstance(wd, dict) else None
+                if not wb or len(wb) != 4:
+                    kept_words.append(wd)
+                    continue
+                cx = float(wb[0]) + float(wb[2]) * 0.5
+                if x_lo <= cx <= x_hi:
+                    kept_words.append(wd)
+            b["words"] = kept_words
 
     return kept_boxes

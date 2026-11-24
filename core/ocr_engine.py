@@ -44,11 +44,13 @@ def _paddle_version() -> str:
     (paddle'ı paddleocr'dan önce import etmek bu ortamda torch/modelscope
     DLL çakışmasına yol açabiliyor; bu yüzden metadata kullanılır.)
     """
-    try:
-        from importlib.metadata import version
-        return version("paddlepaddle")
-    except Exception:
-        return "?"
+    from importlib.metadata import version
+    for dist in ("paddlepaddle-gpu", "paddlepaddle"):
+        try:
+            return version(dist)
+        except Exception:
+            continue
+    return "?"
 
 
 def _load_state() -> dict:
@@ -69,6 +71,40 @@ def _save_state(state: dict):
         pass
 
 
+def _paddle_has_cuda() -> bool:
+    """Yüklü paddlepaddle CUDA ile derlenmiş mi? (CPU sürümünde GPU hiç kullanılamaz)
+    Not: 'import paddle' burada yapılmaz; PaddleOCR'dan önce yüklenirse Windows'ta
+    torch shm.dll çakışmasına (WinError 127) yol açıyor. Paket meta verisine bakılır."""
+    try:
+        from importlib import metadata
+        try:
+            metadata.version("paddlepaddle-gpu")
+            return True
+        except metadata.PackageNotFoundError:
+            pass
+        try:
+            metadata.version("paddlepaddle")
+            return False  # yalnız CPU paketi kurulu
+        except metadata.PackageNotFoundError:
+            return True
+    except Exception:
+        return True  # emin değilsek mevcut GPU→CPU fallback yoluna bırak
+
+
+def _bundled_model_dir(model_name: str):
+    """<paket>/models/<ad> veya <kurulum>/models/<ad> içinde hazır model varsa yolunu döndürür.
+    Geliştirme ortamında bu klasör yoktur → PaddleX her zamanki gibi ~/.paddlex önbelleğini kullanır."""
+    try:
+        from core.config_manager import BASE_DIR, BUNDLE_DIR
+    except Exception:
+        return None
+    for root in dict.fromkeys((BUNDLE_DIR, BASE_DIR)):
+        cand = os.path.join(root, "models", model_name)
+        if os.path.isfile(os.path.join(cand, "inference.yml")):
+            return cand
+    return None
+
+
 def _dummy_image():
     """Ön-ısınma için boş bir görüntü (altyazı şeridine yakın boyut)."""
     import numpy as np
@@ -81,13 +117,21 @@ def _enable_nvidia_dlls() -> bool:
     paddlepaddle-gpu, cuDNN'i sistemde aramak yerine bu klasörlerden de bulabilir.
     """
     import glob
+    import sys
     import sysconfig
+    roots = []
+    # Paketli (PyInstaller) sürüm: nvidia/*/bin klasörleri paket içinde (_MEIPASS)
+    if getattr(sys, "_MEIPASS", None):
+        roots.append(sys._MEIPASS)
     try:
-        site_packages = sysconfig.get_paths()["purelib"]
+        roots.append(sysconfig.get_paths()["purelib"])
     except Exception:
-        return False
+        pass
     found = False
-    for dll_dir in glob.glob(os.path.join(site_packages, "nvidia", "*", "bin")):
+    dll_dirs = []
+    for root in roots:
+        dll_dirs.extend(glob.glob(os.path.join(root, "nvidia", "*", "bin")))
+    for dll_dir in dll_dirs:
         if dll_dir not in os.environ.get("PATH", ""):
             os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
             try:
@@ -106,8 +150,13 @@ class OCREngine:
     """
 
     def __init__(self, version: str = "PP-OCRv6", use_mkldnn: bool = True,
-                 model_size: str = DEFAULT_MODEL_SIZE, device: str = "gpu"):
+                 model_size: str = DEFAULT_MODEL_SIZE, device: str = "gpu",
+                 word_boxes: bool = True):
         self.version = version
+        # Kelime kutuları (return_word_box): buton ikonlarını (R2, X...) metin içinde
+        # konumlandırmak için. Ölçüm: CPU v6-small'da ek gecikme ölçülemeyecek kadar küçük.
+        self.word_boxes = bool(word_boxes)
+        self._word_box_supported = True
         self.use_mkldnn = use_mkldnn
         self.model_size = model_size if model_size in MODEL_SIZE_PRESETS else DEFAULT_MODEL_SIZE
         self.device = device if device in ("cpu", "gpu") else "gpu"
@@ -151,6 +200,11 @@ class OCREngine:
             det, rec = MODEL_SIZE_PRESETS[self.model_size]
             params["text_detection_model_name"] = det
             params["text_recognition_model_name"] = rec
+            # Paketle gelen modeller varsa onları kullan (hedef PC'de indirme gerekmez)
+            det_dir, rec_dir = _bundled_model_dir(det), _bundled_model_dir(rec)
+            if det_dir and rec_dir:
+                params["text_detection_model_dir"] = det_dir
+                params["text_recognition_model_dir"] = rec_dir
         elif self.version in ("PP-OCRv4", "PP-OCRv5"):
             params["ocr_version"] = self.version
         return params
@@ -159,6 +213,14 @@ class OCREngine:
         """PaddleOCR'ı ilk ihtiyaç anında başlat (lazy init)."""
         if self._ocr is not None:
             return
+
+        # CPU derlemeli paddlepaddle'da "gpu" seçilirse Paddle sessizce CPU'ya düşer ve
+        # MKLDNN de kapalı kalır (en yavaş yol). Bunu önceden yakalayıp CPU+MKLDNN'e geç.
+        if self.device == "gpu" and not _paddle_has_cuda():
+            print("[OCR] Uyarı: yüklü paddlepaddle CUDA desteksiz (CPU sürümü) — "
+                  "GPU yerine CPU+MKLDNN kullanılacak. GPU için: paddlepaddle-gpu kurun.")
+            self.device = "cpu"
+            self._restore_mkldnn_state()
 
         enable_mkldnn = self.use_mkldnn and not force_cpu and not self._mkldnn_known_bad
         effective_mkldnn = bool(enable_mkldnn and self.device == "cpu")
@@ -227,6 +289,16 @@ class OCREngine:
                 self.device = device
             self._ocr = None  # Sonraki kullanımda lazy-init olacak
 
+    def _predict_once(self, image):
+        """Tek predict çağrısı; kelime kutusu desteklenmiyorsa (eski API) sessizce kapatır."""
+        if self.word_boxes and self._word_box_supported:
+            try:
+                return self._ocr.predict(image, return_word_box=True)
+            except TypeError:
+                # Eski PaddleOCR imzası return_word_box kabul etmiyor → bir daha deneme
+                self._word_box_supported = False
+        return self._ocr.predict(image)
+
     def _run_predict(self, image):
         """Ortak predict() çalıştırıcısı: iş parçacığı güvenli + GPU/MKLDNN fallback."""
         if image is None or not hasattr(image, "shape") or image.size == 0:
@@ -240,7 +312,7 @@ class OCREngine:
 
             try:
                 t0 = time.time()
-                result = self._ocr.predict(image)
+                result = self._predict_once(image)
                 self.last_infer_seconds = time.time() - t0
                 return result
             except Exception as e:
@@ -263,7 +335,7 @@ class OCREngine:
                     return None
                 try:
                     t0 = time.time()
-                    result = self._ocr.predict(image)
+                    result = self._predict_once(image)
                     self.last_infer_seconds = time.time() - t0
                     return result
                 except Exception as e2:
@@ -295,8 +367,55 @@ class OCREngine:
             return (0.0, 0.0, 0.0, 0.0)
 
     @classmethod
-    def _extract_items(cls, item) -> list:
-        """Tek bir PaddleOCR çıktı öğesinden ham (text, score, xywh, poly) listesi çıkarır."""
+    def _group_words(cls, tokens, token_boxes) -> list:
+        """
+        PaddleOCR kelime parçalarını (text_word / text_word_boxes) boşluğa göre
+        kelimelere gruplar. PaddleX boşluk ve noktalamayı ayrı parça olarak verir
+        (örn. ['Press', ' ', 'R2', ' ', 'to', ',', 'fire']); bitişik parçalar tek
+        kelime olur. Döner: [(text, (x, y, w, h)), ...] (ham OCR karesi koordinatı).
+        """
+        words = []
+        try:
+            if tokens is None or token_boxes is None:
+                return []
+            if hasattr(token_boxes, "tolist"):
+                token_boxes = token_boxes.tolist()
+            tokens = list(tokens)
+            # Çince karakter modunda içerik/kutu sayısı uyuşmayabilir → güvenli tarafta kal
+            if len(tokens) != len(token_boxes):
+                return []
+            cur_txt, cur_box = "", None
+            for tok, tb in zip(tokens, token_boxes):
+                tok = str(tok)
+                if not tok.strip():
+                    if cur_txt and cur_box is not None:
+                        words.append((cur_txt, cur_box))
+                    cur_txt, cur_box = "", None
+                    continue
+                x, y, w, h = cls._box_to_xywh(tb)
+                if w <= 0 or h <= 0:
+                    continue
+                if cur_box is None:
+                    cur_box = (x, y, w, h)
+                else:
+                    cx, cy, cw, ch = cur_box
+                    nx, ny = min(cx, x), min(cy, y)
+                    nx2, ny2 = max(cx + cw, x + w), max(cy + ch, y + h)
+                    cur_box = (nx, ny, nx2 - nx, ny2 - ny)
+                cur_txt += tok.strip()
+            if cur_txt and cur_box is not None:
+                words.append((cur_txt, cur_box))
+        except Exception:
+            return []
+        return words
+
+    @classmethod
+    def _extract_items(cls, item, with_words: bool = False) -> list:
+        """
+        Tek bir PaddleOCR çıktı öğesinden ham (text, score, xywh, poly) listesi çıkarır.
+        with_words=True ise 5. öğe olarak kelime listesi eklenir: [(text, xywh), ...]
+        (kelime verisi yoksa boş liste).
+        """
         extracted = []
 
         # Format 1 & 2: dict veya .json sarmalayıcısı
@@ -315,6 +434,9 @@ class OCREngine:
             if polys is None or (hasattr(polys, "__len__") and len(polys) == 0):
                 polys = data.get("dt_polys")
 
+            word_tokens = data.get("text_word") if with_words else None
+            word_boxes = data.get("text_word_boxes") if with_words else None
+
             for i, raw_txt in enumerate(texts):
                 txt = str(raw_txt).strip() if raw_txt is not None else ""
                 if not txt:
@@ -330,7 +452,14 @@ class OCREngine:
                     xywh = cls._poly_to_bbox(poly)
                 else:
                     xywh = (0.0, 0.0, 0.0, 0.0)
-                extracted.append((txt, score, xywh, poly))
+                if with_words:
+                    words = []
+                    if (word_tokens is not None and word_boxes is not None
+                            and i < len(word_tokens) and i < len(word_boxes)):
+                        words = cls._group_words(word_tokens[i], word_boxes[i])
+                    extracted.append((txt, score, xywh, poly, words))
+                else:
+                    extracted.append((txt, score, xywh, poly))
             return extracted
 
         # Format 3: klasik liste formatı [[poly, (text, score)], ...]
@@ -351,7 +480,7 @@ class OCREngine:
                     continue
                 poly = raw_box.tolist() if hasattr(raw_box, "tolist") else (list(raw_box) if isinstance(raw_box, (list, tuple)) else [])
                 xywh = cls._poly_to_bbox(poly) if poly else (0.0, 0.0, 0.0, 0.0)
-                extracted.append((txt, score, xywh, poly))
+                extracted.append((txt, score, xywh, poly, []) if with_words else (txt, score, xywh, poly))
         return extracted
 
     def read_boxes(self, image, offset_x: int = 0, offset_y: int = 0,
@@ -360,7 +489,9 @@ class OCREngine:
         """
         Görüntüden konumlu metin kutularını okur.
         scale_x / scale_y: küçültülmüş OCR karesini orijinal koordinata çevirme çarpanı.
-        Döner: [{"text": str, "score": float, "bbox": (x, y, w, h), "poly": list, "line_count": 1}, ...]
+        Döner: [{"text": str, "score": float, "bbox": (x, y, w, h), "poly": list, "line_count": 1,
+                 "words": [{"text": str, "bbox": (x, y, w, h)}, ...]},  # "words" yalnızca veri varsa
+                ...]
         """
         result = self._run_predict(image)
         if not result:
@@ -368,7 +499,7 @@ class OCREngine:
 
         boxes = []
         for item in result:
-            for txt, score, (bx, by, bw, bh), poly in self._extract_items(item):
+            for txt, score, (bx, by, bw, bh), poly, raw_words in self._extract_items(item, with_words=True):
                 if score < min_score or bw <= 0 or bh <= 0:
                     continue
                 rx = int(round(offset_x + bx * scale_x))
@@ -379,13 +510,28 @@ class OCREngine:
                     [int(round(offset_x + p[0] * scale_x)), int(round(offset_y + p[1] * scale_y))]
                     for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2
                 ]
-                boxes.append({
+                out = {
                     "text": txt,
                     "score": score,
                     "bbox": (rx, ry, rw, rh),
                     "poly": scaled_poly,
                     "line_count": 1,
-                })
+                }
+                if raw_words:
+                    # Kelime kutularını satır kutusuyla aynı ofset/ölçekle tam kare koordinatına taşı
+                    out["words"] = [
+                        {
+                            "text": wt,
+                            "bbox": (
+                                int(round(offset_x + wx * scale_x)),
+                                int(round(offset_y + wy * scale_y)),
+                                max(1, int(round(ww * scale_x))),
+                                max(1, int(round(wh * scale_y))),
+                            ),
+                        }
+                        for wt, (wx, wy, ww, wh) in raw_words
+                    ]
+                boxes.append(out)
         return boxes
 
     def read_text(self, image) -> str:
@@ -423,13 +569,21 @@ def merge_nearby_boxes(boxes: list[dict], max_y_gap_ratio: float = 0.55,
         return []
 
     def _copy_box(b):
-        return {
+        out = {
             "text": b["text"],
             "score": float(b.get("score", 1.0)),
             "bbox": tuple(b["bbox"]),
             "poly": list(b.get("poly", [])),
             "line_count": int(b.get("line_count", 1)),
         }
+        # Kelime kutuları (buton ikonu konumlandırma) — birleşmede uç uca eklenir
+        if b.get("words"):
+            out["words"] = [dict(w) for w in b["words"]]
+        return out
+
+    def _merge_words(dst, src):
+        if src.get("words"):
+            dst["words"] = list(dst.get("words") or []) + list(src["words"])
 
     # 1) Aynı satırdaki yakın yatay parçaları birleştir (soldan sağa)
     items = sorted((_copy_box(b) for b in boxes), key=lambda b: (b["bbox"][1], b["bbox"][0]))
@@ -469,6 +623,7 @@ def merge_nearby_boxes(boxes: list[dict], max_y_gap_ratio: float = 0.55,
                 prev["bbox"] = (nx, ny, nx2 - nx, ny2 - ny)
                 prev["text"] = f"{prev['text']} {cur['text']}".strip()
                 prev["score"] = min(prev["score"], cur["score"])
+                _merge_words(prev, cur)
                 merged = True
                 break
         if not merged:
@@ -516,6 +671,7 @@ def merge_nearby_boxes(boxes: list[dict], max_y_gap_ratio: float = 0.55,
                 prev["text"] = f"{prev['text']} {cur['text']}".strip()
                 prev["score"] = min(prev["score"], cur["score"])
                 prev["line_count"] += cur["line_count"]
+                _merge_words(prev, cur)
                 merged = True
                 break
         if not merged:

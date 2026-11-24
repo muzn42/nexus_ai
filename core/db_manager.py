@@ -299,16 +299,49 @@ class DBManager:
         self.load_thread.start()
 
 
+_LEARN_JUNK_RE = re.compile(r"^[\d\s.,:/%+-]*(mi|ft|km|m|sn|s|kb|mb)?$", re.I)
+
+
+def is_learnable(source: str, target: str) -> bool:
+    """Otomatik öğrenmeye değmeyen kayıtları eler: harfsiz/çok kısa okumalar, mesafe/sayı değerleri,
+    çevrilmeden dönen metin, dosya yolu / pencere başlığı gibi oyun dışı yazılar."""
+    s, t = (source or "").strip().lower(), (target or "").strip()
+    if len(s) < 4 or not t or t.startswith("[Hata]"):
+        return False
+    if sum(c.isalpha() for c in s) < 3 or _LEARN_JUNK_RE.match(s):
+        return False
+    if t.lower() == s or re.search(r"[ğüşıöçșĞÜŞİÖÇ]", s):   # çevrilmemiş / zaten Türkçe kaynak
+        return False
+    if difflib.SequenceMatcher(None, s, t.lower()).ratio() > 0.9 and len(s) > 12:
+        return False     # aksansız Türkçe ekran yazısı (ör. sohbet penceresi) neredeyse aynen dönmüş
+    if any(x in s for x in ("c:\\", "\\users\\", "appdata", "http", "www.", ".com", ".exe", " → ", " | ")):
+        return False
+    return True
+
+
 class AutoLearnDB:
     """
     Online motordan gelen çevirileri yerel SQLite'a kaydeder.
     Böylece aynı cümle tekrar geldiğinde internete gitmeden anında döner.
     'Öğrenen' bir çeviri cache sistemi.
+
+    Öğrenilenler OYUNA ÖZELDİR: aktif oyun DB'si (ör. gta6_ceviri.db) seçiliyse onun içindeki
+    `learned_translations` tablosuna yazılır, başka oyunda bu kayıtlar hiç aranmaz. Oyun DB'si
+    seçili değilse (Doğrudan Yapay Zeka modu) genel data/translation_cache.db kullanılır.
     """
 
-    def __init__(self, data_dir: str):
-        self.db_path = os.path.join(data_dir, "translation_cache.db")
+    def __init__(self, data_dir: str, db_path: str = ""):
+        self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+        self.set_db(db_path)
+
+    def set_db(self, db_path: str = ""):
+        """Öğrenme deposunu aktif oyun DB'sine bağlar (sözlük değişince çağrılır)."""
+        p = (db_path or "").strip()
+        if p and p.lower() not in ("none", "yok", "db_yok") and os.path.isfile(p):
+            self.db_path = p
+        else:
+            self.db_path = os.path.join(self.data_dir, "translation_cache.db")
         self._init_db()
 
     def _init_db(self):
@@ -344,6 +377,8 @@ class AutoLearnDB:
 
     def save(self, source: str, target: str, engine: str):
         """Yeni çeviriyi kaydet (otomatik öğrenme)."""
+        if not is_learnable(source, target):
+            return
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute(

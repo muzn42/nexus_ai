@@ -1,0 +1,123 @@
+{
+ "_aciklama": "GTA 6 karakter defteri. Çevirmen her toplu çeviride bunu bağlam olarak okur. Elle düzenlenebilir; 'dogrulandi': false olanlar videodan/fragmanlardan tahmindir, oynadıkça düzeltin. Yeni konuşmacılar araç tarafından 'yeni_konusmacilar' listesine eklenir.",
+ "genel_kurallar": [
+  "Türkçede cinsiyetli zamir yok; cinsiyet yalnızca hitap kelimelerinde (kızım, dostum, abi, bebeğim) ve karşılıklı ilişkide önemlidir.",
+  "Varsayılan: yakın arkadaşlar, sevgililer, suç ortakları ve sokak dili 'sen'. Polis/memur/yabancıya resmî konuşma, müşteri hizmetleri ve hakim 'siz'.",
+  "Küfür ve argo yumuşatılmadan ama doğal Türkçe karşılığıyla çevrilir ('fuck' -> 'siktir' / 'lanet olsun' bağlama göre; 'bro' -> 'kanka'/'dostum').",
+  "Altyazılar kısa ve konuşma dilinde olmalı; kitap dili ('olmaktadır', 'gerçekleştirmek') kullanılmaz."
+ ],
+ "karakterler": {
+  "Jason": {
+   "tam_ad": "Jason Duval",
+   "cinsiyet": "erkek",
+   "rol": "oynanabilir ana karakter",
+   "iliskiler": {
+    "Lucia": "sevgilisi / suç ortağı (sen)",
+    "Cal": "yakın arkadaşı (sen)",
+    "Brian": "patronu / ev sahibi (sen, saygılı ama rahat)"
+   },
+   "uslup": "Sakin, kuru espri yapan, az konuşan; kısa cümleler.",
+   "dogrulandi": false
+  },
+  "Lucia": {
+   "tam_ad": "Lucia Caminos",
+   "cinsiyet": "kadın",
+   "rol": "oynanabilir ana karakter",
+   "iliskiler": {
+    "Jason": "sevgilisi / suç ortağı (sen)"
+   },
+   "uslup": "Kendinden emin, sert, sokak zekâlı; yeri gelince alaycı. İspanyolca kelimeler kullanabilir (aynen bırakılır, gerekirse anlamı korunur).",
+   "dogrulandi": false
+  },
+  "Cal": {
+   "tam_ad": "Cal Hampton",
+   "cinsiyet": "erkek",
+   "rol": "Jason'ın arkadaşı",
+   "iliskiler": {
+    "Jason": "kanka (sen)"
+   },
+   "uslup": "Komplo teorisyeni, geveze, paranoyak, argo ve küfürlü; 'bro' -> 'kanka'.",
+   "dogrulandi": false
+  },
+  "Brian": {
+   "tam_ad": "Brian Heder",
+   "cinsiyet": "erkek",
+   "rol": "yaşlı kaçakçı, Jason'ın ev sahibi",
+   "iliskiler": {
+    "Jason": "sen"
+   },
+   "uslup": "Yaşlı, rahat, babacan ama kurnaz.",
+   "dogrulandi": false
+  }
+ },
+ "yeni_konusmacilar": {
+  "Donnie": "male / contact on radio / friendly, conversational",
+  "Kingfishers": "erkekler / düşman çete üyeleri / kaba, küfürlü ve rahat konuşurlar",
+  "Floyd": "erkek / Kingfishers çete üyesi",
+  "Andrew Node": "male / tech billionaire mentioned in Cal's conspiracy theory",
+  "Cop": "erkek / polis memuru / telsizde resmî ve profesyonel konuşuyor",
+  "Prison Recording": "automated / robotic / prison phone system",
+  "Yolanda": "kadın / koğuş arkadaşı (Lucia) / samimi, alaycı konuşur",
+  "Antonia": "kadın / koğuş arkadaşı (Lucia) / rahat konuşur",
+  "Zoey": "kadın / koğuş arkadaşı (Lucia) / öfkeli, açık sözlü konuşur",
+  "CO Wilson": "erkek / cezaevi memuru / sert, doğrudan konuşur",
+  "CO Johnson": "gardiyan / Wilson'ın iş arkadaşı, rahat konuşur",
+  "Connie": "kadın / mahkûm / dedikoducu, sokak ağzıyla konuşur",
+  "Shayna": "kadın / mahkûm / argo ve küfürlü, rahat sokak diliyle konuşur",
+  "Devin": "kadın / mahkûm / kısa ve rahat konuşur",
+  "Tera": "kadın / mahkûm / agresif, küfürlü konuşur",
+  "Ronda": "kadın / mahkûm / savunmacı, alaycı konuşur",
+  "Isabelle": "kadın / mahkûm / sabırsız, rahat konuşur",
+  "Penelope": "kadın / mahkûm / diğer mahkûmun saçını örüyor, sinirli ve rahat konuşur",
+  "Olivia": "kadın / mahkûm / saçını ördürüyor, savunmacı konuşur",
+  "Stefanie Gates": "kadın / cezaevi danışmanı / nazik, sakin, profesyonel (siz)",
+  "Teller": "erkek/kadın / veznedar / korkmuş, rehine",
+  "Stefanie": "kadın / hapishane danışmanı / sıcak ama gerçekçi, Lucia'ya 'sen' diye hitap eder",
+  "Manager": "erkek / Küba restoranı müdürü / sabırsız, İspanyolca ifadeler kullanır",
+  "Karl": "male / Kingfishers gang member",
+  "Lori": "female / commanding, playful with Brian",
+  "Inmate": "kadın / hapishane mahkumu / kaba ve saldırgan",
+  "Andrew": "male / ex-military gun store clerk at Chuck's Tackle & Shot (Ammu-Nation) / friendly, casual, uses military slang ('at ease', 'stay frosty'), calls Jason 'Marauder'",
+  "Dolores": "pet snake belonging to Brian / Jason",
+  "Joey": "male / valet or attendant / casual, helpful",
+  "Clerk": "içki dükkânı tezgahtarı / bıkkın, kaba ve küfürlü konuşuyor",
+  "Mandy": "kadın / Jason'la muhatap olan kiracı veya komşu / alaycı ve sert konuşur",
+  "Don Percival": "male / CEO of Merryweather Security",
+  "Taxi Driver": "taksi şoförü / santral / nazik ve profesyonel (siz)",
+  "Bert": "male / aggressive stranger shouting from roadside",
+  "Shirley": "female / pedestrian with dog Arugula / conversational",
+  "Driver": "taksi şoförü / düz konuşan",
+  "Arugula": "Shirley'nin köpeği (adı Roka)",
+  "Arnold": "erkek / Brian'ın husumetli olduğu eski iş ortağı / panik halinde, yalvaran, korkak",
+  "Kenton": "erkek / Jason'a dalış işi veren tanıdığı / samimi ve rahat konuşuyor",
+  "Zak": "male / Kingfishers gang member mentioned by group",
+  "Dobbs": "male / tourist on scuba tour / dramatic, complaining, relieved",
+  "Kyle": "male / tourist on scuba tour / easily scared, excitable",
+  "Jeremy": "male / tourist on scuba tour / anxious, appreciative",
+  "Todd": "male / rival salvage operator (Bancroft) / smug, condescending, boisterous",
+  "Cameron": "male / Todd's associate / smug, mocking",
+  "Peggy": "kadın / Jason'ın yanından geçtiği bir evden duyulan veya yanında konuşan kişi / şikâyetçi",
+  "Johannes Zuch": "kurgusal oyun geliştiricisi / Tenebrae Lux oyununun yaratıcısı",
+  "GØITR": "Johannes Zuch'un rumuzu / takma adı",
+  "R.T. Gravenhurst": "fictional author quoted in Johannes Zuch's game",
+  "The Man": "erkek / siyah-beyaz sanat oyunundaki anlatıcı karakter / karanlık ve şiirsel konuşur",
+  "Zoe": "kadın / atari zombi oyunu telsiz karakteri / coşkulu, teşvik edici",
+  "Andy": "male / bartender / friendly, gives Jason advice",
+  "Stranger": "erkek / iskeledeki balıkçı / rahat, gündelik konuşur (sen)",
+  "Greg": "erkek / barmen / Andy'nin mesai arkadaşı / net ve mesafeli",
+  "Guard": "hapishane gardiyanı / resmi ve emredici konuşur",
+  "Tomás": "erkek bebek / Lucia'nın oğlu",
+  "Kat": "kadın / hamile, Lucia ile samimi, İtalyanca da konuşabiliyor",
+  "Lorena": "female / Lucia's aunt (tía) taking care of Tommy",
+  "Tommy": "male / Lucia's son in Liberty State",
+  "Aviator": "erkekler / kavgacı, küfürlü ve kibirli grup (D-Man dahil)",
+  "Mattia": "erkek / Kat'ın yanındaki İtalyan, rahat konuşuyor",
+  "Old Man": "erkek / bar tuvaletinde Jason'la konuşan sarhoş yaşlı adam",
+  "Local": "bar müşterisi / tuvalet kapısında bekleyen sabırsız kişi",
+  "Dorean": "kadın / bar müşterisi",
+  "Rhonda": "kadın / köpeğini kaybeden bar müşterisi",
+  "Band": "müzik grubu / sahneden konuşan müzisyen",
+  "Kenton Rees": "erkek / Brian'ın eski arkadaşı, define avcısı / rahat, hikâyeci, samimi ve argo konuşuyor",
+  "Bartender": "erkek (Greg) / barmen / kısa ve iş odaklı konuşuyor"
+ }
+}
